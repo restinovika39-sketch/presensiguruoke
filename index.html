@@ -628,12 +628,12 @@ input[type="file"]::file-selector-button:hover {
     <script>
         // GANTI KONFIGURASI INI DENGAN FIREBASE PROJECT ANDA
         const firebaseConfig = {
-            apiKey: "AIzaSyDMowztoC5ZyUN3uPjeUS9kF0ZDkMKLs6E",
-            authDomain: "absenguruid.firebaseapp.com",
-            projectId: "absenguruid",
-            storageBucket: "absenguruid.firebasestorage.app",
-            messagingSenderId: "300644814180",
-            appId: "1:300644814180:web:f1cfd528782af624663e71"
+            apiKey: "AIzaSyDL2IQTkYxcRl4XmEoOgf76CVVbj9qr6z0",
+            authDomain: "absensiguru-268d9.firebaseapp.com",
+            projectId: "absensiguru-268d9",
+            storageBucket: "absensiguru-268d9.firebasestorage.app",
+            messagingSenderId: "1014685328974",
+            appId: "1:1014685328974:web:031c9d916a8b3605ca051f"
         };
         firebase.initializeApp(firebaseConfig);
         const db = firebase.firestore();
@@ -4579,6 +4579,16 @@ service cloud.firestore {
             const nama = guru.nama || '-';
             const jabatan = guru.jabatan || 'Guru';
 
+            // Tanggal pendaftaran guru & tanggal mulai presensi sekolah
+            let startOfDaftar = null;
+            if (guru.createdAt) {
+                const tglDaftar = this.parseDateSafe(guru.createdAt);
+                if (tglDaftar) {
+                    startOfDaftar = new Date(tglDaftar.getFullYear(), tglDaftar.getMonth(), tglDaftar.getDate());
+                }
+            }
+            const tanggalMulaiSekolah = this.getTanggalMulaiPresensi();
+
             const dailyCodes = {};
             let hadir = 0, terlambat = 0, izin = 0, sakit = 0, cuti = 0, alpa = 0;
 
@@ -4607,7 +4617,13 @@ service cloud.firestore {
                     } else if (st === 'CUTI') {
                         code = 'C';
                     } else if (st === 'ALPA') {
-                        code = info.isLibur ? 'L' : 'A';
+                        if (info.isLibur) {
+                            code = 'L';
+                        } else {
+                            const isBeforeDaftar = startOfDaftar && curDateOnly < startOfDaftar;
+                            const isBeforeSekolah = tanggalMulaiSekolah && curDateOnly < tanggalMulaiSekolah;
+                            code = (isBeforeDaftar || isBeforeSekolah) ? '-' : 'A';
+                        }
                     } else if (r.jamMasuk && r.jamMasuk !== '--:--' && r.jamMasuk !== '-') {
                         code = 'H';
                     }
@@ -4652,36 +4668,50 @@ service cloud.firestore {
                                 if (curDateOnly > todayDateOnly) {
                                     code = '-'; // Hari kerja di masa depan
                                 } else if (curDateOnly.getTime() === todayDateOnly.getTime()) {
-                                    // Hari ini: periksa jam kerja selesai
-                                    const shiftRaw = String(guru.shift || guru.shiftKerja || guru.jamKerja || 'Pagi').trim().toLowerCase();
-                                    const isSiang = shiftRaw.includes('siang');
-                                    const dayOfWeek = info.checkDate.getDay();
-                                    const cfgLokasi = this.mockData?.lokasiDanJamKerja || {};
-                                    const cfgJk = cfgLokasi.jamKerja || {};
-                                    const shiftCfg = isSiang ? (cfgJk.siang || {}) : (cfgJk.pagi || {});
-                                    let defaultPulang = isSiang ? (dayOfWeek === 5 ? '17:30' : '17:00') : (dayOfWeek === 5 ? '11:30' : '12:00');
-                                    let jamPulangStr = defaultPulang;
-                                    if (dayOfWeek === 5) jamPulangStr = shiftCfg.jumat?.pulang || defaultPulang;
-                                    else if (dayOfWeek === 6) jamPulangStr = shiftCfg.sabtu?.pulang || defaultPulang;
-                                    else jamPulangStr = shiftCfg.seninKamis?.pulang || defaultPulang;
+                                    // Hari ini: periksa apakah guru sudah terdaftar & sekolah sudah mulai presensi
+                                    const isBeforeDaftar = startOfDaftar && curDateOnly < startOfDaftar;
+                                    const isBeforeSekolah = tanggalMulaiSekolah && curDateOnly < tanggalMulaiSekolah;
+                                    if (isBeforeDaftar || isBeforeSekolah) {
+                                        code = '-';
+                                    } else {
+                                        // Hari ini: periksa jam kerja selesai
+                                        const shiftRaw = String(guru.shift || guru.shiftKerja || guru.jamKerja || 'Pagi').trim().toLowerCase();
+                                        const isSiang = shiftRaw.includes('siang');
+                                        const dayOfWeek = info.checkDate.getDay();
+                                        const cfgLokasi = this.mockData?.lokasiDanJamKerja || {};
+                                        const cfgJk = cfgLokasi.jamKerja || {};
+                                        const shiftCfg = isSiang ? (cfgJk.siang || {}) : (cfgJk.pagi || {});
+                                        let defaultPulang = isSiang ? (dayOfWeek === 5 ? '17:30' : '17:00') : (dayOfWeek === 5 ? '11:30' : '12:00');
+                                        let jamPulangStr = defaultPulang;
+                                        if (dayOfWeek === 5) jamPulangStr = shiftCfg.jumat?.pulang || defaultPulang;
+                                        else if (dayOfWeek === 6) jamPulangStr = shiftCfg.sabtu?.pulang || defaultPulang;
+                                        else jamPulangStr = shiftCfg.seninKamis?.pulang || defaultPulang;
 
-                                    let [hP, mP] = (jamPulangStr || defaultPulang).split(':').map(Number);
-                                    if (isNaN(hP)) hP = isSiang ? 17 : (dayOfWeek === 5 ? 11 : 12);
-                                    if (isNaN(mP)) mP = 0;
-                                    let jamKerjaSelesaiTotalMin = (hP * 60) + mP;
-                                    if (!isSiang) {
-                                        const minSelesaiPagi = (dayOfWeek === 6 ? 13 : 14) * 60;
-                                        jamKerjaSelesaiTotalMin = Math.max(minSelesaiPagi, jamKerjaSelesaiTotalMin);
+                                        let [hP, mP] = (jamPulangStr || defaultPulang).split(':').map(Number);
+                                        if (isNaN(hP)) hP = isSiang ? 17 : (dayOfWeek === 5 ? 11 : 12);
+                                        if (isNaN(mP)) mP = 0;
+                                        let jamKerjaSelesaiTotalMin = (hP * 60) + mP;
+                                        if (!isSiang) {
+                                            const minSelesaiPagi = (dayOfWeek === 6 ? 13 : 14) * 60;
+                                            jamKerjaSelesaiTotalMin = Math.max(minSelesaiPagi, jamKerjaSelesaiTotalMin);
+                                        }
+
+                                        if (currentTotalMin < jamKerjaSelesaiTotalMin) {
+                                            code = '-';
+                                        } else {
+                                            code = 'A';
+                                        }
                                     }
-
-                                    if (currentTotalMin < jamKerjaSelesaiTotalMin) {
+                                } else {
+                                    // Hari kerja lampau tanpa presensi/keterangan
+                                    // Cek apakah sebelum guru terdaftar atau sebelum presensi online sekolah dimulai
+                                    const isBeforeDaftar = startOfDaftar && curDateOnly < startOfDaftar;
+                                    const isBeforeSekolah = tanggalMulaiSekolah && curDateOnly < tanggalMulaiSekolah;
+                                    if (isBeforeDaftar || isBeforeSekolah) {
                                         code = '-';
                                     } else {
                                         code = 'A';
                                     }
-                                } else {
-                                    // Hari kerja lampau tanpa presensi/keterangan
-                                    code = 'A';
                                 }
                             }
                         }
