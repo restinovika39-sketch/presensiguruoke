@@ -619,12 +619,12 @@ input[type="file"]::file-selector-button:hover {
     <script>
         // GANTI KONFIGURASI INI DENGAN FIREBASE PROJECT ANDA
         const firebaseConfig = {
-            apiKey: "AIzaSyCIqKIGPIrhCUSg1NtxG7y-iogW8k0OLC8",
-            authDomain: "presensiguruok.firebaseapp.com",
-            projectId: "presensiguruok",
-            storageBucket: "presensiguruok.firebasestorage.app",
-            messagingSenderId: "673675608533",
-            appId: "1:673675608533:web:582e21eff3eed168a77d5c"
+            apiKey: "AIzaSyDL2IQTkYxcRl4XmEoOgf76CVVbj9qr6z0",
+            authDomain: "absensiguru-268d9.firebaseapp.com",
+            projectId: "absensiguru-268d9",
+            storageBucket: "absensiguru-268d9.firebasestorage.app",
+            messagingSenderId: "1014685328974",
+            appId: "1:1014685328974:web:031c9d916a8b3605ca051f"
         };
         firebase.initializeApp(firebaseConfig);
         const db = firebase.firestore();
@@ -740,8 +740,112 @@ var app = {
         }
 
         // 2. Mendengarkan perubahan dari Firebase (Sync Real-time)
+        this.setupFirebaseListeners();
+        
+        // 3. Auto-save perubahan dari sisi pengguna ke Firebase
+        let lastSavedDataString = JSON.stringify(this.mockData);
+        setInterval(() => {
+            const currentDataString = JSON.stringify(this.mockData);
+            
+            // Simpan ke lokal
+            if (currentDataString !== lastSavedDataString) {
+                localStorage.setItem(APP_STORAGE_KEY, currentDataString);
+                
+                // Hapus data yang sudah memiliki koleksi sendiri agar tidak memperbesar mainState
+                let dataToSave = JSON.parse(currentDataString);
+                delete dataToSave.riwayat;
+                delete dataToSave.riwayatLamaMainState;
+                delete dataToSave.dataGuru;
+                delete dataToSave.dataGuruLamaMainState;
+                delete dataToSave.schoolSettings;
+                
+                // TAHAP 3: Hapus data yang sudah memiliki koleksi sendiri
+                delete dataToSave.izinAdmin;
+                delete dataToSave.izinLamaMainState;
+                delete dataToSave.izin;
+                delete dataToSave.jurnal;
+                delete dataToSave.jurnalLamaMainState;
+                delete dataToSave.slipGaji;
+                delete dataToSave.slipLamaMainState;
+
+                // Simpan ke Firebase hanya jika ada perubahan (Dan hanya dilakukan oleh Admin)
+                // Ini mencegah masalah contention (antrean) ketika ratusan guru absen bersamaan
+                const userInfo = JSON.parse(localStorage.getItem('user_info') || '{}');
+                if (userInfo.role && userInfo.role.toUpperCase() === 'ADMIN' && !this.state.firebasePermissionError) {
+                    try {
+                        if (typeof db !== 'undefined') {
+                            db.collection('appData').doc('mainState').set(dataToSave, { merge: true })
+                                .catch(e => {
+                                    if (e && (e.code === 'permission-denied' || (e.message && e.message.includes('Missing or insufficient permissions')))) {
+                                        this.handleFirebaseError(e, 'autosave');
+                                    } else {
+                                        console.warn("Gagal simpan ke Firebase", e);
+                                    }
+                                });
+                        }
+                    } catch (e) {}
+                }
+                
+                lastSavedDataString = currentDataString;
+            }
+        }, 2000);
+
+        this.injectTemplates();
+        if (typeof this.applySchoolBrand === 'function') {
+            this.applySchoolBrand();
+        }
+        if (typeof this.renderPengaturanLokasi === 'function') {
+            this.renderPengaturanLokasi();
+        }
+
+        this.autoGenerateAlpa();
+
+        // Auto-evaluasi ALPA secara berkala saat aplikasi aktif
+        setInterval(() => {
+            try {
+                if (this.state && (this.state.currentScreen === 'admin-dashboard' || this.state.currentScreen === 'guru-dashboard')) {
+                    this.autoGenerateAlpa();
+                    if (this.state.currentScreen === 'admin-dashboard' && typeof this.loadDashboardAdmin === 'function') this.loadDashboardAdmin();
+                    else if (this.state.currentScreen === 'guru-dashboard' && typeof this.loadDashboardGuruData === 'function' && this.state.currentUser) this.loadDashboardGuruData(this.state.currentUser);
+                }
+            } catch (e) {
+                console.warn('Interval autoGenerateAlpa error:', e);
+            }
+        }, 30000);
+
+        const token = localStorage.getItem('session_token');
+        const userStr = localStorage.getItem('user_info');
+        if (token && userStr) {
+            const user = JSON.parse(userStr);
+            this.state.currentUser = user;
+            if (user.role === 'ADMIN') {
+                this.navigate('admin-dashboard');
+            } else {
+                this.navigate('guru-dashboard');
+            }
+        } else {
+            this.navigate('login');
+        }
+    },
+
+    // ==========================================
+    // MANAJEMEN KONEKSI FIREBASE & ERROR PERMISSION
+    // ==========================================
+    setupFirebaseListeners() {
+        if (typeof db === 'undefined' || !db) return;
+
+        // Unsubscribe listener lama jika ada (agar tidak duplicate saat tes ulang koneksi)
+        if (typeof this._unsubMainState === 'function') { try { this._unsubMainState(); } catch(e){} }
+        if (typeof this._unsubPresensi === 'function') { try { this._unsubPresensi(); } catch(e){} }
+        if (typeof this._unsubGuru === 'function') { try { this._unsubGuru(); } catch(e){} }
+        if (typeof this._unsubPengaturanSekolah === 'function') { try { this._unsubPengaturanSekolah(); } catch(e){} }
+        if (typeof this._unsubPengaturanLokasi === 'function') { try { this._unsubPengaturanLokasi(); } catch(e){} }
+        if (typeof this._unsubIzin === 'function') { try { this._unsubIzin(); } catch(e){} }
+        if (typeof this._unsubJurnal === 'function') { try { this._unsubJurnal(); } catch(e){} }
+        if (typeof this._unsubSlip === 'function') { try { this._unsubSlip(); } catch(e){} }
+
         try {
-            db.collection('appData').doc('mainState').onSnapshot((doc) => {
+            this._unsubMainState = db.collection('appData').doc('mainState').onSnapshot((doc) => {
                 if (doc.exists) {
                     const fbData = doc.data() || {};
                     // Cegah loop tak berujung, update lokal jika Firebase punya versi berbeda
@@ -756,7 +860,6 @@ var app = {
                         const localDataGuru = this.mockData.dataGuru || [];
 
                         // Buat salinan fbData tanpa koleksi yang memiliki dokumen/koleksi tersendiri
-                        // Ini mencegah terhapusnya riwayat presensi, jurnal, izin, slip gaji, dan data guru
                         const cleanFbData = { ...fbData };
                         delete cleanFbData.riwayat;
                         delete cleanFbData.riwayatLamaMainState;
@@ -852,7 +955,7 @@ var app = {
                             this.applySchoolBrand();
                         }
 
-                        // Jika berada di dashboard atau screen lain, kita mungkin perlu refresh tampilan
+                        // Jika berada di dashboard atau screen lain, refresh tampilan
                         if (this.state) {
                             if (this.state.currentScreen === 'admin-dashboard' && typeof this.loadDashboardAdmin === 'function') this.loadDashboardAdmin();
                             else if (this.state.currentScreen === 'guru-dashboard' && typeof this.loadDashboardGuruData === 'function' && this.state.currentUser) this.loadDashboardGuruData(this.state.currentUser);
@@ -871,14 +974,16 @@ var app = {
                     }
                 } else {
                     // Jika dokumen di Firebase belum ada, buat pertama kali
-                    db.collection('appData').doc('mainState').set(this.mockData);
+                    db.collection('appData').doc('mainState').set(this.mockData).catch(err => {
+                        this.handleFirebaseError(err, 'mainState-set');
+                    });
                 }
             }, (error) => {
-                console.error("Gagal mendengarkan Firebase:", error);
+                this.handleFirebaseError(error, 'mainState');
             });
 
             // TAHAP 1: Mendengarkan koleksi presensi_guru yang baru
-            db.collection('presensi_guru').onSnapshot((snapshot) => {
+            this._unsubPresensi = db.collection('presensi_guru').onSnapshot((snapshot) => {
                 let koleksiRiwayat = [];
                 if (snapshot) {
                     snapshot.forEach(doc => {
@@ -895,10 +1000,8 @@ var app = {
                 });
                 delete this.mockData.riwayatLamaMainState;
                 
-                // Simpan ke lokal agar tetap responsif saat direfresh
                 localStorage.setItem(APP_STORAGE_KEY, JSON.stringify(this.mockData));
                 
-                // Refresh tampilan jika admin sedang membuka halaman rekap/riwayat
                 if (this.state) {
                     if (this.state.currentScreen === 'admin-dashboard' && typeof this.loadDashboardAdmin === 'function') this.loadDashboardAdmin();
                     if (this.state.currentScreen === 'admin-rekap' && typeof this.loadRekapAdmin === 'function') this.loadRekapAdmin();
@@ -906,10 +1009,12 @@ var app = {
                     if (this.state.currentScreen === 'guru-riwayat' && typeof this.loadRiwayatGuru === 'function') this.loadRiwayatGuru();
                     if (this.state.currentScreen === 'guru-dashboard' && typeof this.loadDashboardGuruData === 'function' && this.state.currentUser) this.loadDashboardGuruData(this.state.currentUser);
                 }
+            }, (error) => {
+                this.handleFirebaseError(error, 'presensi_guru');
             });
 
             // TAHAP 2: Mendengarkan koleksi data_guru yang baru
-            db.collection('data_guru').onSnapshot((snapshot) => {
+            this._unsubGuru = db.collection('data_guru').onSnapshot((snapshot) => {
                 let koleksiGuru = [];
                 if (snapshot) {
                     snapshot.forEach(doc => {
@@ -945,10 +1050,12 @@ var app = {
                 if (this.state && this.state.currentScreen === 'guru-dashboard' && typeof this.loadDashboardGuruData === 'function' && this.state.currentUser) {
                     this.loadDashboardGuruData(this.state.currentUser);
                 }
+            }, (error) => {
+                this.handleFirebaseError(error, 'data_guru');
             });
 
             // TAHAP 2: Mendengarkan koleksi pengaturan
-            db.collection('pengaturan').doc('sekolah').onSnapshot((doc) => {
+            this._unsubPengaturanSekolah = db.collection('pengaturan').doc('sekolah').onSnapshot((doc) => {
                 if (doc.exists) {
                     this.mockData.schoolSettings = { ...this.mockData.schoolSettings, ...doc.data() };
                     localStorage.setItem(APP_STORAGE_KEY, JSON.stringify(this.mockData));
@@ -959,9 +1066,11 @@ var app = {
                         this.renderPengaturan();
                     }
                 }
+            }, (error) => {
+                this.handleFirebaseError(error, 'pengaturan/sekolah');
             });
 
-            db.collection('pengaturan').doc('lokasi').onSnapshot((doc) => {
+            this._unsubPengaturanLokasi = db.collection('pengaturan').doc('lokasi').onSnapshot((doc) => {
                 if (doc.exists) {
                     this.mockData.lokasiDanJamKerja = { ...(this.mockData.lokasiDanJamKerja || {}), ...doc.data() };
                     if (this.mockData.lokasiDanJamKerja.lat && this.mockData.lokasiDanJamKerja.lng) {
@@ -976,10 +1085,12 @@ var app = {
                         this.renderPengaturanLokasi();
                     }
                 }
+            }, (error) => {
+                this.handleFirebaseError(error, 'pengaturan/lokasi');
             });
 
             // TAHAP 3: Mendengarkan koleksi izin_guru
-            db.collection('izin_guru').onSnapshot((snapshot) => {
+            this._unsubIzin = db.collection('izin_guru').onSnapshot((snapshot) => {
                 let koleksi = [];
                 if (snapshot) {
                     snapshot.forEach(doc => {
@@ -995,10 +1106,12 @@ var app = {
                     if (this.state.currentScreen === 'admin-izin' && typeof this.renderDataIzin === 'function') this.renderDataIzin();
                     if (this.state.currentScreen === 'guru-izin' && typeof this.loadIzinGuru === 'function') this.loadIzinGuru();
                 }
+            }, (error) => {
+                this.handleFirebaseError(error, 'izin_guru');
             });
 
             // TAHAP 3: Mendengarkan koleksi jurnal_guru
-            db.collection('jurnal_guru').onSnapshot((snapshot) => {
+            this._unsubJurnal = db.collection('jurnal_guru').onSnapshot((snapshot) => {
                 let koleksi = [];
                 if (snapshot) {
                     snapshot.forEach(doc => {
@@ -1013,10 +1126,12 @@ var app = {
                     if (this.state.currentScreen === 'admin-jurnal' && typeof this.loadJurnalAdmin === 'function') this.loadJurnalAdmin();
                     if (this.state.currentScreen === 'guru-jurnal' && typeof this.loadJurnalGuru === 'function') this.loadJurnalGuru();
                 }
+            }, (error) => {
+                this.handleFirebaseError(error, 'jurnal_guru');
             });
 
             // TAHAP 3: Mendengarkan koleksi slip_gaji
-            db.collection('slip_gaji').onSnapshot((snapshot) => {
+            this._unsubSlip = db.collection('slip_gaji').onSnapshot((snapshot) => {
                 let koleksi = [];
                 if (snapshot) {
                     snapshot.forEach(doc => {
@@ -1031,95 +1146,195 @@ var app = {
                     if (this.state.currentScreen === 'admin-slip' && typeof this.renderDataSlip === 'function') this.renderDataSlip();
                     if (this.state.currentScreen === 'guru-slip-gaji' && typeof this.loadSlipGuru === 'function') this.loadSlipGuru();
                 }
+            }, (error) => {
+                this.handleFirebaseError(error, 'slip_gaji');
             });
 
         } catch (e) {
             console.error("Firebase tidak terinisialisasi dengan benar", e);
         }
-        
-        // 3. Auto-save perubahan dari sisi pengguna ke Firebase
-        let lastSavedDataString = JSON.stringify(this.mockData);
-        setInterval(() => {
-            const currentDataString = JSON.stringify(this.mockData);
-            
-            // Simpan ke lokal
-            if (currentDataString !== lastSavedDataString) {
-                localStorage.setItem(APP_STORAGE_KEY, currentDataString);
-                
-                // Hapus data yang sudah memiliki koleksi sendiri agar tidak memperbesar mainState
-                let dataToSave = JSON.parse(currentDataString);
-                delete dataToSave.riwayat;
-                delete dataToSave.riwayatLamaMainState;
-                delete dataToSave.dataGuru;
-                delete dataToSave.dataGuruLamaMainState;
-                delete dataToSave.schoolSettings;
-                
-                // TAHAP 3: Hapus data yang sudah memiliki koleksi sendiri
-                delete dataToSave.izinAdmin;
-                delete dataToSave.izinLamaMainState;
-                delete dataToSave.izin;
-                delete dataToSave.jurnal;
-                delete dataToSave.jurnalLamaMainState;
-                delete dataToSave.slipGaji;
-                delete dataToSave.slipLamaMainState;
+    },
 
-                // Simpan ke Firebase hanya jika ada perubahan (Dan hanya dilakukan oleh Admin)
-                // Ini mencegah masalah contention (antrean) ketika ratusan guru absen bersamaan
-                const userInfo = JSON.parse(localStorage.getItem('user_info') || '{}');
-                if (userInfo.role && userInfo.role.toUpperCase() === 'ADMIN') {
-                    try {
-                        if (typeof db !== 'undefined') {
-                            db.collection('appData').doc('mainState').set(dataToSave, { merge: true })
-                                .catch(e => console.error("Gagal simpan ke Firebase", e));
-                        }
-                    } catch (e) {}
-                }
-                
-                lastSavedDataString = currentDataString;
+    handleFirebaseError(error, source) {
+        const isPermission = error && (
+            error.code === 'permission-denied' ||
+            (error.message && error.message.toLowerCase().includes('permission'))
+        );
+
+        if (isPermission) {
+            this.state.firebasePermissionError = true;
+            this.state.firebasePermissionErrorDetails = {
+                source: source,
+                time: new Date().toLocaleTimeString(),
+                message: error.message || 'Missing or insufficient permissions'
+            };
+            if (!this._warnedFirebasePermission) {
+                this._warnedFirebasePermission = true;
+                console.warn(`[Firebase Security Rules] Akses Firestore ditolak (sumber: ${source}). Pastikan Aturan Keamanan (Rules) Firestore pada project Firebase sekolah telah diatur ke: allow read, write: if true;`);
             }
-        }, 2000);
-
-        this.injectTemplates();
-        if (typeof this.applySchoolBrand === 'function') {
-            this.applySchoolBrand();
-        }
-        if (typeof this.renderPengaturanLokasi === 'function') {
-            this.renderPengaturanLokasi();
-        }
-
-        this.autoGenerateAlpa();
-
-        // Auto-evaluasi ALPA secara berkala saat aplikasi aktif
-        setInterval(() => {
-            try {
-                if (this.state && (this.state.currentScreen === 'admin-dashboard' || this.state.currentScreen === 'guru-dashboard')) {
-                    this.autoGenerateAlpa();
-                    if (this.state.currentScreen === 'admin-dashboard' && typeof this.loadDashboardAdmin === 'function') this.loadDashboardAdmin();
-                    else if (this.state.currentScreen === 'guru-dashboard' && typeof this.loadDashboardGuruData === 'function' && this.state.currentUser) this.loadDashboardGuruData(this.state.currentUser);
-                }
-            } catch (e) {
-                console.warn('Interval autoGenerateAlpa error:', e);
-            }
-        }, 30000);
-
-        const token = localStorage.getItem('session_token');
-        const userStr = localStorage.getItem('user_info');
-        if (token && userStr) {
-            const user = JSON.parse(userStr);
-            this.state.currentUser = user;
-            if (user.role === 'ADMIN') {
-                this.navigate('admin-dashboard');
-            } else {
-                this.navigate('guru-dashboard');
+            if (this.state.currentScreen === 'admin-dashboard' && typeof this.renderFirebaseAlertBanner === 'function') {
+                this.renderFirebaseAlertBanner();
             }
         } else {
-            this.navigate('login');
+            console.warn(`[Firebase Error: ${source}]`, error);
         }
     },
 
-    // ==========================================
-    // LOGIKA PENETAPAN ALPA OTOMATIS & LIBUR
-    // ==========================================
+    renderFirebaseAlertBanner() {
+        const container = document.getElementById('admin-firebase-alert-container');
+        if (!container) return;
+
+        if (!this.state.firebasePermissionError) {
+            container.innerHTML = '';
+            return;
+        }
+
+        const projectId = (typeof firebaseConfig !== 'undefined' && firebaseConfig && firebaseConfig.projectId) ? firebaseConfig.projectId : '';
+        const rulesUrl = projectId ? `https://console.firebase.google.com/project/${projectId}/firestore/rules` : 'https://console.firebase.google.com';
+
+        container.innerHTML = `
+            <div class="mb-6 bg-gradient-to-r from-amber-50 to-orange-50 border-2 border-amber-300 rounded-2xl p-5 shadow-sm">
+                <div class="flex items-start gap-4">
+                    <div class="w-11 h-11 rounded-xl bg-amber-500 text-white flex items-center justify-center shrink-0 shadow-md">
+                        <span class="material-icons-round text-2xl">admin_panel_settings</span>
+                    </div>
+                    <div class="flex-1 min-w-0">
+                        <div class="flex items-center gap-2 flex-wrap mb-1">
+                            <h3 class="text-base font-bold text-amber-900">Perhatian: Aturan Keamanan Firebase Belum Dibuka (Missing Permissions)</h3>
+                            <span class="px-2.5 py-0.5 text-xs font-semibold rounded-full bg-amber-200 text-amber-900">Project Baru</span>
+                        </div>
+                        <p class="text-sm text-amber-800 leading-relaxed mb-3">
+                            Aplikasi mendeteksi error <code class="bg-amber-100 text-amber-900 px-1.5 py-0.5 rounded font-mono text-xs font-semibold">Missing or insufficient permissions</code>. 
+                            Ini normal pada project Firebase baru karena aturan default Firebase Firestore masih terkunci. Silakan buka aturan rules agar aplikasi presensi seluruh guru dapat membaca dan menyimpan data secara real-time.
+                        </p>
+
+                        <!-- Box Snippet Rules -->
+                        <div class="bg-gray-900 rounded-xl p-3.5 mb-3 border border-gray-800 text-xs font-mono text-gray-100 shadow-inner">
+                            <div class="flex items-center justify-between pb-2 mb-2 border-b border-gray-700 text-gray-400">
+                                <span class="flex items-center gap-1.5 font-semibold text-gray-300"><span class="material-icons-round text-sm text-amber-400">code</span> Firestore Rules</span>
+                                <button type="button" id="btn-copy-rules" onclick="app.salinKodeRulesFirebase()" class="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-amber-500 hover:bg-amber-600 text-white font-medium text-xs transition-colors shadow-sm">
+                                    <span class="material-icons-round text-xs">content_copy</span>
+                                    <span id="label-copy-rules">Salin Kode Rules</span>
+                                </button>
+                            </div>
+<pre class="overflow-x-auto text-[11px] leading-relaxed text-emerald-300">rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /{document=**} {
+      allow read, write: if true;
+    }
+  }
+}</pre>
+                        </div>
+
+                        <!-- Action Buttons -->
+                        <div class="flex flex-wrap items-center gap-2.5 pt-1">
+                            <a href="${rulesUrl}" target="_blank" rel="noopener noreferrer" class="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-amber-600 hover:bg-amber-700 text-white text-xs font-semibold shadow-sm transition-all">
+                                <span class="material-icons-round text-sm">open_in_new</span>
+                                Buka Menu Rules di Firebase Console
+                            </a>
+                            <button type="button" onclick="app.tesUlangKoneksiFirebase()" id="btn-retest-firebase" class="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-white hover:bg-amber-100 text-amber-800 border border-amber-300 text-xs font-semibold shadow-sm transition-all">
+                                <span class="material-icons-round text-sm text-amber-600">sync</span>
+                                Cek & Hubungkan Ulang Sekarang
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        `;
+    },
+
+    salinKodeRulesFirebase() {
+        const rulesText = `rules_version = '2';\nservice cloud.firestore {\n  match /databases/{database}/documents {\n    match /{document=**} {\n      allow read, write: if true;\n    }\n  }\n}`;
+        const btnLabel = document.getElementById('label-copy-rules');
+        const onSuccess = () => {
+            if (btnLabel) btnLabel.textContent = 'Berhasil Disalin!';
+            if (typeof this.showToast === 'function') {
+                this.showToast('Kode Firestore Rules berhasil disalin! Tempelkan di Firebase Console menu Rules lalu klik Publish.', 'check_circle', 'text-green-400');
+            }
+            setTimeout(() => {
+                if (btnLabel) btnLabel.textContent = 'Salin Kode Rules';
+            }, 3000);
+        };
+
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(rulesText).then(onSuccess).catch(() => {
+                this.fallbackCopyText(rulesText);
+                onSuccess();
+            });
+        } else {
+            this.fallbackCopyText(rulesText);
+            onSuccess();
+        }
+    },
+
+    fallbackCopyText(text) {
+        const textArea = document.createElement("textarea");
+        textArea.value = text;
+        textArea.style.position = "fixed";
+        textArea.style.top = "0";
+        textArea.style.left = "0";
+        textArea.style.opacity = "0";
+        document.body.appendChild(textArea);
+        textArea.focus();
+        textArea.select();
+        try {
+            document.execCommand('copy');
+        } catch (err) {}
+        document.body.removeChild(textArea);
+    },
+
+    async tesUlangKoneksiFirebase() {
+        const btn = document.getElementById('btn-retest-firebase');
+        if (btn) {
+            btn.disabled = true;
+            btn.innerHTML = `<span class="material-icons-round text-sm animate-spin">refresh</span> Sedang Menguji...`;
+        }
+
+        if (typeof db === 'undefined' || !db) {
+            if (typeof this.showToast === 'function') this.showToast('Firebase belum terinisialisasi di browser ini.', 'error_outline', 'text-red-400');
+            if (btn) {
+                btn.disabled = false;
+                btn.innerHTML = `<span class="material-icons-round text-sm text-amber-600">sync</span> Cek & Hubungkan Ulang Sekarang`;
+            }
+            return;
+        }
+
+        try {
+            const testRef = db.collection('appData').doc('_permissionTest');
+            await testRef.set({ test: true, timestamp: Date.now() });
+            await testRef.delete().catch(() => {});
+
+            // Jika berhasil sampai sini, aturan sudah dibuka!
+            this.state.firebasePermissionError = false;
+            this._warnedFirebasePermission = false;
+            
+            // Re-setup real-time listeners
+            this.setupFirebaseListeners();
+            this.renderFirebaseAlertBanner();
+
+            if (typeof this.showToast === 'function') {
+                this.showToast('Alhamdulillah, koneksi Firebase berhasil & izin terbuka!', 'check_circle', 'text-green-400');
+            }
+        } catch (err) {
+            console.warn('[Firebase Test Error]', err);
+            const isPermission = err && (err.code === 'permission-denied' || (err.message && err.message.toLowerCase().includes('permission')));
+            if (isPermission) {
+                if (typeof this.showToast === 'function') {
+                    this.showToast('Firebase Rules masih belum terbuka. Pastikan Anda sudah mengklik tombol "Publish" di Firebase Console.', 'warning', 'text-amber-400');
+                }
+            } else {
+                if (typeof this.showToast === 'function') {
+                    this.showToast('Gagal terhubung: ' + (err.message || 'Periksa koneksi internet'), 'error_outline', 'text-red-400');
+                }
+            }
+        } finally {
+            if (btn) {
+                btn.disabled = false;
+                btn.innerHTML = `<span class="material-icons-round text-sm text-amber-600">sync</span> Cek & Hubungkan Ulang Sekarang`;
+            }
+        }
+    },
     parseDateSafe(d) {
         if (!d) return null;
         if (d instanceof Date) return isNaN(d.getTime()) ? null : d;
@@ -1327,7 +1542,7 @@ var app = {
                         const targetNips = [r.nip].filter(Boolean);
                         targetNips.forEach(tNip => {
                             const docId = `${checkYear}${checkMonth.toString().padStart(2, '0')}${d.toString().padStart(2, '0')}_${tNip}`;
-                            try { if (typeof db !== 'undefined') db.collection('presensi_guru').doc(docId).delete(); } catch(e){}
+                            try { if (typeof db !== 'undefined' && !this.state.firebasePermissionError) db.collection('presensi_guru').doc(docId).delete().catch(() => {}); } catch(e){}
                         });
                     }
                     return !isAlpa;
@@ -1358,7 +1573,7 @@ var app = {
                             const targetNips = [r.nip, nip, guru.nip, guru.username, guru.id].filter(Boolean);
                             targetNips.forEach(tNip => {
                                 const docId = `${checkYear}${checkMonth.toString().padStart(2, '0')}${d.toString().padStart(2, '0')}_${tNip}`;
-                                try { if (typeof db !== 'undefined') db.collection('presensi_guru').doc(docId).delete(); } catch(e){}
+                                try { if (typeof db !== 'undefined' && !this.state.firebasePermissionError) db.collection('presensi_guru').doc(docId).delete().catch(() => {}); } catch(e){}
                             });
                             return false;
                         }
@@ -1461,8 +1676,8 @@ var app = {
                     // Sinkronisasi data ke Firestore presensi_guru
                     const docId = `${checkYear}${checkMonth.toString().padStart(2, '0')}${d.toString().padStart(2, '0')}_${nip}`;
                     try {
-                        if (typeof db !== 'undefined') {
-                            db.collection('presensi_guru').doc(docId).set(alpaRecord, { merge: true });
+                        if (typeof db !== 'undefined' && !this.state.firebasePermissionError) {
+                            db.collection('presensi_guru').doc(docId).set(alpaRecord, { merge: true }).catch(() => {});
                         }
                     } catch(e) {}
                 } else if ((recordExists.status || '').toUpperCase() !== 'ALPA' && (recordExists.status || '').toUpperCase().includes('BELUM')) {
@@ -1471,8 +1686,8 @@ var app = {
                     hasChanges = true;
                     const docId = `${checkYear}${checkMonth.toString().padStart(2, '0')}${d.toString().padStart(2, '0')}_${nip}`;
                     try {
-                        if (typeof db !== 'undefined') {
-                            db.collection('presensi_guru').doc(docId).set(recordExists, { merge: true });
+                        if (typeof db !== 'undefined' && !this.state.firebasePermissionError) {
+                            db.collection('presensi_guru').doc(docId).set(recordExists, { merge: true }).catch(() => {});
                         }
                     } catch(e) {}
                 }
@@ -3626,6 +3841,11 @@ var app = {
     loadDashboardAdmin() {
         // Evaluasi ALPA sistem secara otomatis sebelum merender dashboard
         this.autoGenerateAlpa();
+
+        // Tampilkan peringatan jika Firestore Security Rules belum diaktifkan
+        if (typeof this.renderFirebaseAlertBanner === 'function') {
+            this.renderFirebaseAlertBanner();
+        }
 
         const activeGurus = (this.mockData.dataGuru || []).filter(g => g.statusAkun === 'AKTIF' || g.statusAkun === 'Aktif');
         const totalGuru = activeGurus.length || (this.mockData.dataGuru || []).length;
@@ -7634,6 +7854,9 @@ var app = {
                 <div class="flex-1 flex flex-col min-w-0">
                     ${this.adminTopbar('Dashboard Admin')}
                     <div class="p-6 flex-1 overflow-y-auto">
+                        <!-- Firebase Alert Banner Container -->
+                        <div id="admin-firebase-alert-container"></div>
+
                         <!-- Stats Grid -->
                         <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4 mb-6">
                             <div class="bg-white p-5 rounded-xl border border-gray-200 shadow-sm flex items-center justify-between">
