@@ -39,6 +39,15 @@
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin=""/>
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
     <!-- Tailwind CSS -->
+    <script>
+        (function() {
+            const _origWarn = console.warn;
+            console.warn = function(...args) {
+                if (args && args[0] && typeof args[0] === 'string' && args[0].includes('cdn.tailwindcss.com')) return;
+                _origWarn.apply(console, args);
+            };
+        })();
+    </script>
     <script src="https://cdn.tailwindcss.com"></script>
     <script>
         tailwind.config = {
@@ -619,12 +628,12 @@ input[type="file"]::file-selector-button:hover {
     <script>
         // GANTI KONFIGURASI INI DENGAN FIREBASE PROJECT ANDA
         const firebaseConfig = {
-            apiKey: "AIzaSyDMowztoC5ZyUN3uPjeUS9kF0ZDkMKLs6E",
-            authDomain: "absenguruid.firebaseapp.com",
-            projectId:  "absenguruid",
-            storageBucket: "absenguruid.firebasestorage.app",
-            messagingSenderId: "300644814180",
-            appId: "1:300644814180:web:f1cfd528782af624663e71"
+            apiKey: "AIzaSyDL2IQTkYxcRl4XmEoOgf76CVVbj9qr6z0",
+            authDomain: "absensiguru-268d9.firebaseapp.com",
+            projectId: "absensiguru-268d9",
+            storageBucket: "absensiguru-268d9.firebasestorage.app",
+            messagingSenderId: "1014685328974",
+            appId: "1:1014685328974:web:031c9d916a8b3605ca051f"
         };
         firebase.initializeApp(firebaseConfig);
         const db = firebase.firestore();
@@ -664,6 +673,7 @@ var app = {
             logoKabKotaUrl: "",
             hariLibur: [], // Contoh: ['17/08/2026', '25/12/2026']
             hariLiburMingguan: [0], // 0 = Minggu (libur rutin mingguan)
+            tanggalMulaiPresensi: "", // Tanggal mulai berlakunya presensi online sekolah (YYYY-MM-DD)
             kopRekap: {
                 aktif: true,
                 tampilkanAlamat: true,
@@ -798,6 +808,7 @@ var app = {
             this.renderPengaturanLokasi();
         }
 
+        this.bersihkanAlpaTidakValid();
         this.autoGenerateAlpa();
 
         // Auto-evaluasi ALPA secara berkala saat aplikasi aktif
@@ -1340,6 +1351,13 @@ service cloud.firestore {
         if (d instanceof Date) return isNaN(d.getTime()) ? null : d;
         if (typeof d === 'string') {
             const trimmed = d.trim();
+            if (trimmed.includes('T')) {
+                const datePart = trimmed.split('T')[0];
+                const p = datePart.split('-');
+                if (p.length === 3) {
+                    return new Date(Number(p[0]), Number(p[1]) - 1, Number(p[2]));
+                }
+            }
             if (trimmed.includes('/')) {
                 const parts = trimmed.split('/');
                 if (parts.length === 3) {
@@ -1349,9 +1367,9 @@ service cloud.firestore {
                 const parts = trimmed.split('-');
                 if (parts.length === 3) {
                     if (parts[0].length === 4) {
-                        return new Date(Number(parts[0]), Number(parts[1]) - 1, Number(parts[2]));
+                        return new Date(Number(parts[0]), Number(parts[1]) - 1, parseInt(parts[2]));
                     } else {
-                        return new Date(Number(parts[2]), Number(parts[1]) - 1, Number(parts[0]));
+                        return new Date(Number(parts[2]), Number(parts[1]) - 1, parseInt(parts[0]));
                     }
                 }
             }
@@ -1491,8 +1509,177 @@ service cloud.firestore {
         });
     },
 
+    ensureGuruCreatedAt() {
+        if (!this.mockData || !this.mockData.dataGuru) return;
+        const defaultDate = this.mockData.schoolSettings?.tanggalMulaiPresensi ? 
+            new Date(this.mockData.schoolSettings.tanggalMulaiPresensi).toISOString() : 
+            new Date().toISOString();
+        let changed = false;
+        this.mockData.dataGuru.forEach(g => {
+            if (!g.createdAt) {
+                g.createdAt = defaultDate;
+                changed = true;
+            }
+        });
+        if (changed) {
+            try { localStorage.setItem(APP_STORAGE_KEY, JSON.stringify(this.mockData)); } catch(e){}
+        }
+    },
+
+    getTanggalMulaiPresensi() {
+        // 1. Cek dari pengaturan sekolah jika admin sudah menentukan tanggal mulai presensi
+        if (this.mockData && this.mockData.schoolSettings && this.mockData.schoolSettings.tanggalMulaiPresensi) {
+            const parsed = this.parseDateSafe(this.mockData.schoolSettings.tanggalMulaiPresensi);
+            if (parsed) {
+                return new Date(parsed.getFullYear(), parsed.getMonth(), parsed.getDate());
+            }
+        }
+
+        // 2. Jika belum disetel di pengaturan, periksa riwayat presensi yang riil (HADIR, TERLAMBAT, IZIN, SAKIT, CUTI)
+        const riilRecords = (this.mockData?.riwayat || []).filter(r => {
+            const stat = (r.status || '').toUpperCase();
+            return stat !== 'ALPA' && stat !== '' && (r.jamMasuk !== '--:--' || stat === 'IZIN' || stat === 'SAKIT' || stat === 'CUTI');
+        });
+
+        if (riilRecords.length > 0) {
+            let earliestDate = null;
+            riilRecords.forEach(r => {
+                const d = this.parseDateSafe(r.tanggal);
+                if (d && (!earliestDate || d < earliestDate)) {
+                    earliestDate = d;
+                }
+            });
+            if (earliestDate) {
+                const normalized = new Date(earliestDate.getFullYear(), earliestDate.getMonth(), earliestDate.getDate());
+                if (this.mockData && this.mockData.schoolSettings) {
+                    const y = normalized.getFullYear();
+                    const m = (normalized.getMonth() + 1).toString().padStart(2, '0');
+                    const day = normalized.getDate().toString().padStart(2, '0');
+                    this.mockData.schoolSettings.tanggalMulaiPresensi = `${y}-${m}-${day}`;
+                }
+                return normalized;
+            }
+        }
+
+        // 3. Jika belum ada riwayat presensi riil sama sekali (misal aplikasi baru dideploy):
+        // Cari tanggal pembuatan akun guru tertua (createdAt)
+        const gurus = this.mockData?.dataGuru || [];
+        let earliestGuruDate = null;
+        gurus.forEach(g => {
+            if (g.createdAt) {
+                const d = this.parseDateSafe(g.createdAt);
+                if (d && (!earliestGuruDate || d < earliestGuruDate)) {
+                    earliestGuruDate = d;
+                }
+            }
+        });
+
+        if (earliestGuruDate) {
+            const normalized = new Date(earliestGuruDate.getFullYear(), earliestGuruDate.getMonth(), earliestGuruDate.getDate());
+            if (this.mockData && this.mockData.schoolSettings) {
+                const y = normalized.getFullYear();
+                const m = (normalized.getMonth() + 1).toString().padStart(2, '0');
+                const day = normalized.getDate().toString().padStart(2, '0');
+                this.mockData.schoolSettings.tanggalMulaiPresensi = `${y}-${m}-${day}`;
+            }
+            return normalized;
+        }
+
+        // 4. Default: Hari ini saat sistem pertama kali dijalankan
+        const today = new Date();
+        const normalized = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+        if (this.mockData && this.mockData.schoolSettings) {
+            const y = normalized.getFullYear();
+            const m = (normalized.getMonth() + 1).toString().padStart(2, '0');
+            const day = normalized.getDate().toString().padStart(2, '0');
+            this.mockData.schoolSettings.tanggalMulaiPresensi = `${y}-${m}-${day}`;
+        }
+        return normalized;
+    },
+
+    hapusDokumenFirestorePresensi(r) {
+        if (!r || !r.tanggal || !r.nip || typeof db === 'undefined' || this.state.firebasePermissionError) return;
+        try {
+            const parts = r.tanggal.split('/');
+            if (parts.length === 3) {
+                const docId = `${parts[2]}${parts[1]}${parts[0]}_${r.nip}`;
+                db.collection('presensi_guru').doc(docId).delete().catch(() => {});
+            }
+        } catch(e) {}
+    },
+
+    bersihkanAlpaTidakValid() {
+        if (!this.mockData || !this.mockData.riwayat) return false;
+        
+        this.ensureGuruCreatedAt();
+        const tanggalMulai = this.getTanggalMulaiPresensi();
+        const activeGurus = this.mockData.dataGuru || [];
+        const guruMap = new Map();
+        activeGurus.forEach(g => {
+            const nip = g.username || g.nip || g.id;
+            if (nip) guruMap.set(nip, g);
+            if (g.nip) guruMap.set(g.nip, g);
+            if (g.username) guruMap.set(g.username, g);
+            if (g.nama) guruMap.set(g.nama.trim().toLowerCase(), g);
+        });
+
+        let hasChanges = false;
+        const initialCount = this.mockData.riwayat.length;
+
+        this.mockData.riwayat = this.mockData.riwayat.filter(r => {
+            const isAlpa = (r.status || '').toUpperCase() === 'ALPA';
+            const isSystemAlpa = isAlpa && (
+                (r.keterangan || '').toLowerCase().includes('sistem') ||
+                (r.jamMasuk === '--:--' && r.jamPulang === '--:--')
+            );
+
+            if (!isSystemAlpa) return true; // Data riil tetap aman
+
+            const tglObj = this.parseDateSafe(r.tanggal);
+            if (!tglObj) return true;
+            const checkDay = new Date(tglObj.getFullYear(), tglObj.getMonth(), tglObj.getDate());
+
+            // 1. Jika tanggal ALPA adalah hari libur (mingguan atau khusus) -> Hapus
+            if (this.isTanggalLibur(tglObj)) {
+                this.hapusDokumenFirestorePresensi(r);
+                return false;
+            }
+
+            // 2. Jika tanggal ALPA sebelum tanggal mulai presensi sekolah -> Hapus
+            if (tanggalMulai && checkDay < tanggalMulai) {
+                this.hapusDokumenFirestorePresensi(r);
+                return false;
+            }
+
+            // 3. Jika tanggal ALPA sebelum guru tersebut terdaftar / dibuat -> Hapus
+            const guru = guruMap.get(r.nip) || (r.namaGuru ? guruMap.get(r.namaGuru.trim().toLowerCase()) : null);
+            if (guru && guru.createdAt) {
+                const tglDaftar = this.parseDateSafe(guru.createdAt);
+                if (tglDaftar) {
+                    const startOfDaftar = new Date(tglDaftar.getFullYear(), tglDaftar.getMonth(), tglDaftar.getDate());
+                    if (checkDay < startOfDaftar) {
+                        this.hapusDokumenFirestorePresensi(r);
+                        return false;
+                    }
+                }
+            }
+
+            return true;
+        });
+
+        if (this.mockData.riwayat.length !== initialCount) {
+            hasChanges = true;
+            localStorage.setItem(APP_STORAGE_KEY, JSON.stringify(this.mockData));
+        }
+
+        return hasChanges;
+    },
+
     autoGenerateAlpa(targetMonth, targetYear) {
         if (!this.mockData || !this.mockData.dataGuru || !this.mockData.riwayat) return;
+
+        // Bersihkan terlebih dahulu ALPA tidak valid (sebelum tanggal mulai atau sebelum akun guru dibuat)
+        this.bersihkanAlpaTidakValid();
 
         const now = new Date();
         const currentYear = now.getFullYear();
@@ -1510,6 +1697,16 @@ service cloud.firestore {
             return;
         }
 
+        const tanggalMulaiSekolah = this.getTanggalMulaiPresensi();
+        if (tanggalMulaiSekolah) {
+            const startYear = tanggalMulaiSekolah.getFullYear();
+            const startMonth = tanggalMulaiSekolah.getMonth() + 1;
+            // Jika bulan yang dicek berada di masa lalu sebelum sekolah mulai presensi, jangan buat ALPA
+            if (checkYear < startYear || (checkYear === startYear && checkMonth < startMonth)) {
+                return;
+            }
+        }
+
         const isCurrentMonth = (checkYear === currentYear && checkMonth === currentMonth);
         const totalDaysInMonth = new Date(checkYear, checkMonth, 0).getDate();
         const maxDay = isCurrentMonth ? currentDay : totalDaysInMonth;
@@ -1523,9 +1720,22 @@ service cloud.firestore {
             startDay = this.mockData.lastResetDay;
         }
 
+        // Jika bulan ini adalah bulan dimulainya presensi sekolah, mulai evaluasi dari tanggal mulai presensi
+        if (tanggalMulaiSekolah && checkYear === tanggalMulaiSekolah.getFullYear() && checkMonth === (tanggalMulaiSekolah.getMonth() + 1)) {
+            const startTgl = tanggalMulaiSekolah.getDate();
+            if (startTgl > startDay) {
+                startDay = startTgl;
+            }
+        }
+
         for (let d = startDay; d <= maxDay; d++) {
             const checkDate = new Date(checkYear, checkMonth - 1, d);
             const tglStr = `${d.toString().padStart(2, '0')}/${checkMonth.toString().padStart(2, '0')}/${checkYear}`;
+
+            // KONDISI 0: Tanggal sebelum sekolah mulai presensi online
+            if (tanggalMulaiSekolah && checkDate < tanggalMulaiSekolah) {
+                continue;
+            }
 
             // Kondisi 1 & 2: Hari Libur Mingguan
             const isLiburMingguan = this.isHariLiburMingguan(checkDate);
@@ -1539,11 +1749,7 @@ service cloud.firestore {
                 this.mockData.riwayat = this.mockData.riwayat.filter(r => {
                     const isAlpa = r.tanggal === tglStr && (r.status || '').toUpperCase() === 'ALPA';
                     if (isAlpa) {
-                        const targetNips = [r.nip].filter(Boolean);
-                        targetNips.forEach(tNip => {
-                            const docId = `${checkYear}${checkMonth.toString().padStart(2, '0')}${d.toString().padStart(2, '0')}_${tNip}`;
-                            try { if (typeof db !== 'undefined' && !this.state.firebasePermissionError) db.collection('presensi_guru').doc(docId).delete().catch(() => {}); } catch(e){}
-                        });
+                        this.hapusDokumenFirestorePresensi(r);
                     }
                     return !isAlpa;
                 });
@@ -1570,17 +1776,25 @@ service cloud.firestore {
                         const isAlpa = (r.status || '').toUpperCase() === 'ALPA';
                         if (matchGuru && matchTgl && isAlpa) {
                             removed = true;
-                            const targetNips = [r.nip, nip, guru.nip, guru.username, guru.id].filter(Boolean);
-                            targetNips.forEach(tNip => {
-                                const docId = `${checkYear}${checkMonth.toString().padStart(2, '0')}${d.toString().padStart(2, '0')}_${tNip}`;
-                                try { if (typeof db !== 'undefined' && !this.state.firebasePermissionError) db.collection('presensi_guru').doc(docId).delete().catch(() => {}); } catch(e){}
-                            });
+                            this.hapusDokumenFirestorePresensi(r);
                             return false;
                         }
                         return true;
                     });
                     if (removed) hasChanges = true;
                 };
+
+                // KONDISI 0B: Guru belum terdaftar / belum dibuat pada tanggal ini
+                if (guru.createdAt) {
+                    const tglDaftar = this.parseDateSafe(guru.createdAt);
+                    if (tglDaftar) {
+                        const startOfDaftar = new Date(tglDaftar.getFullYear(), tglDaftar.getMonth(), tglDaftar.getDate());
+                        if (checkDate < startOfDaftar) {
+                            removeSystemAlpa();
+                            return;
+                        }
+                    }
+                }
 
                 // Kondisi 8: Waktu presensi yang diwajibkan telah berakhir sesuai aturan jam kerja
                 if (isToday) {
@@ -2952,6 +3166,19 @@ service cloud.firestore {
         document.getElementById('set-kepsek').value = s.namaKepalaSekolah;
         document.getElementById('set-nip-kepsek').value = s.nipKepalaSekolah;
 
+        const elTglMulai = document.getElementById('set-tgl-mulai-presensi');
+        if (elTglMulai) {
+            const tglObj = this.getTanggalMulaiPresensi();
+            let val = s.tanggalMulaiPresensi || '';
+            if (!val && tglObj) {
+                const y = tglObj.getFullYear();
+                const m = (tglObj.getMonth() + 1).toString().padStart(2, '0');
+                const d = tglObj.getDate().toString().padStart(2, '0');
+                val = `${y}-${m}-${d}`;
+            }
+            elTglMulai.value = val;
+        }
+
         // Logos
         if(s.logoSekolahUrl) document.getElementById('preview-logo-sekolah').src = s.logoSekolahUrl;
         
@@ -3529,9 +3756,18 @@ service cloud.firestore {
             nipKepalaSekolah: document.getElementById('set-nip-kepsek').value.trim(),
             gunakanLogoKabKota: document.getElementById('set-toggle-kabkota').checked
         };
+
+        const elTglMulai = document.getElementById('set-tgl-mulai-presensi');
+        if (elTglMulai && elTglMulai.value) {
+            payload.tanggalMulaiPresensi = elTglMulai.value;
+        }
         
         Object.assign(this.mockData.schoolSettings, payload);
         
+        // Bersihkan data ALPA yang berada di luar masa berlaku
+        this.bersihkanAlpaTidakValid();
+        this.autoGenerateAlpa();
+
         // Simpan seketika ke LocalStorage
         localStorage.setItem(APP_STORAGE_KEY, JSON.stringify(this.mockData));
         
@@ -6973,6 +7209,7 @@ service cloud.firestore {
             this.showToast('Data guru berhasil ditambahkan.', 'check_circle', 'text-green-400');
         }
 
+        this.bersihkanAlpaTidakValid();
         this.renderDataGuru();
         this.tutupModalTambahGuru();
     },
@@ -7165,6 +7402,7 @@ service cloud.firestore {
             }
         });
         
+        this.bersihkanAlpaTidakValid();
         this.renderDataGuru();
         this.tutupModalImportExcel();
         this.showToast(`Berhasil mengimpor ${count} data guru!`, 'check_circle', 'text-green-400');
@@ -7260,6 +7498,11 @@ service cloud.firestore {
                                             <div>
                                                 <label class="block text-xs font-semibold text-gray-700 mb-1">NIP Kepala Sekolah</label>
                                                 <input type="text" id="set-nip-kepsek" class="w-full border border-gray-300 rounded-lg p-2.5 text-sm focus:ring-1 focus:ring-primary focus:border-primary outline-none">
+                                            </div>
+                                            <div class="border-t border-gray-100 pt-4 mt-4">
+                                                <label class="block text-xs font-semibold text-gray-700 mb-1">Tanggal Mulai Presensi Online</label>
+                                                <input type="date" id="set-tgl-mulai-presensi" class="w-full border border-gray-300 rounded-lg p-2.5 text-sm focus:ring-1 focus:ring-primary focus:border-primary outline-none">
+                                                <p class="text-[11px] text-gray-400 mt-1">Presensi guru & evaluasi ALPA hanya dihitung sejak tanggal ini. Hari sebelum tanggal ini tidak dianggap Alpa.</p>
                                             </div>
                                         </div>
                                     </div>
