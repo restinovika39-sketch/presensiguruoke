@@ -628,12 +628,12 @@ input[type="file"]::file-selector-button:hover {
     <script>
         // GANTI KONFIGURASI INI DENGAN FIREBASE PROJECT ANDA
         const firebaseConfig = {
-            apiKey: "AIzaSyBnU6QQc3ey0MfYGu3EdvUVqdejSbD9dIE",
-            authDomain: "presensiguruok-26b99.firebaseapp.com",
-            projectId: "presensiguruok-26b99",
-            storageBucket: "presensiguruok-26b99.firebasestorage.app",
-            messagingSenderId: "388168203365",
-            appId: "1:388168203365:web:754f27c3d5ffb93b491a8c"
+            apiKey: "AIzaSyDL2IQTkYxcRl4XmEoOgf76CVVbj9qr6z0",
+            authDomain: "absensiguru-268d9.firebaseapp.com",
+            projectId: "absensiguru-268d9",
+            storageBucket: "absensiguru-268d9.firebasestorage.app",
+            messagingSenderId: "1014685328974",
+            appId: "1:1014685328974:web:031c9d916a8b3605ca051f"
         };
         firebase.initializeApp(firebaseConfig);
         const db = firebase.firestore();
@@ -999,7 +999,44 @@ var app = {
                 if (snapshot) {
                     snapshot.forEach(doc => {
                         const d = doc.data();
-                        if (d && !d.isDeleted) koleksiRiwayat.push(d);
+                        if (d && !d.isDeleted) {
+                            // Auto-heal: Jika ada bukti foto tetapi status ALPA atau jamMasuk --:--, pulihkan sebagai Hadir
+                            const hasFoto = this.isPresensiAdaFoto(d);
+                            const isAlpa = (d.status || '').toUpperCase() === 'ALPA';
+                            const isBlankMasuk = (!d.jamMasuk || d.jamMasuk === '--:--' || d.jamMasuk === '-') && (!d.jam_masuk || d.jam_masuk === '--:--' || d.jam_masuk === '-');
+                            
+                            if (hasFoto && (isAlpa || isBlankMasuk)) {
+                                const gInfo = (this.mockData.dataGuru || []).find(g => 
+                                    (g.id && g.id === d.nip) || 
+                                    (g.username && g.username === d.nip) || 
+                                    (g.nip && g.nip === d.nip) || 
+                                    (g.nama && d.namaGuru && g.nama.trim().toLowerCase() === d.namaGuru.trim().toLowerCase())
+                                );
+                                 const shiftInfo = this.getShiftKerjaConfig(gInfo, d.tanggal);
+                                if (isBlankMasuk) {
+                                    const defaultMasuk = shiftInfo.masuk;
+                                    d.jamMasuk = defaultMasuk;
+                                    d.jam_masuk = defaultMasuk;
+                                }
+                                if (isAlpa) {
+                                    d.status = 'Hadir';
+                                }
+                                d.keterangan = 'Presensi Masuk Tercatat';
+                                
+                                // Sync perbaikan balik ke Firestore
+                                try {
+                                    if (typeof db !== 'undefined' && doc.id) {
+                                        db.collection('presensi_guru').doc(doc.id).set({
+                                            jamMasuk: d.jamMasuk,
+                                            jam_masuk: d.jamMasuk,
+                                            status: d.status,
+                                            keterangan: d.keterangan
+                                        }, { merge: true }).catch(() => {});
+                                    }
+                                } catch(e) {}
+                            }
+                            koleksiRiwayat.push(d);
+                        }
                     });
                 }
                 
@@ -1448,12 +1485,14 @@ service cloud.firestore {
         const nama = guru.nama;
         const riwayatList = this.mockData.riwayat || [];
         return riwayatList.some(r => {
-            const matchGuru = (r.nip && (r.nip === nip || r.nip === guru.nip || r.nip === guru.username)) || 
+            const matchGuru = (r.nip && (r.nip === nip || r.nip === guru.nip || r.nip === guru.username || r.nip === guru.id)) || 
                               (r.namaGuru && nama && r.namaGuru.trim().toLowerCase() === nama.trim().toLowerCase());
             if (!matchGuru || r.tanggal !== tglStr) return false;
             
+            // Jika ada foto masuk/pulang, presensi riil sudah dilakukan
+            if (this.isPresensiAdaFoto(r)) return true;
+
             const stat = (r.status || '').toUpperCase();
-            if (stat === 'ALPA') return false;
             if (stat.includes('HADIR') || stat.includes('TERLAMBAT') || stat.includes('SELESAI') || stat.includes('DI LUAR LOKASI')) {
                 return true;
             }
@@ -1620,13 +1659,56 @@ service cloud.firestore {
             if (nip) guruMap.set(nip, g);
             if (g.nip) guruMap.set(g.nip, g);
             if (g.username) guruMap.set(g.username, g);
+            if (g.id) guruMap.set(g.id, g);
             if (g.nama) guruMap.set(g.nama.trim().toLowerCase(), g);
         });
 
         let hasChanges = false;
         const initialCount = this.mockData.riwayat.length;
 
+        // Auto-heal: Pulihkan presensi yang memiliki bukti foto tetapi statusnya tercatat ALPA atau jam masuk terhapus
+        this.mockData.riwayat.forEach(r => {
+            const hasFoto = this.isPresensiAdaFoto(r);
+            const isAlpa = (r.status || '').toUpperCase() === 'ALPA';
+            const isBlankMasuk = (!r.jamMasuk || r.jamMasuk === '--:--' || r.jamMasuk === '-') && (!r.jam_masuk || r.jam_masuk === '--:--' || r.jam_masuk === '-');
+
+            if (hasFoto && (isAlpa || isBlankMasuk)) {
+                const guru = guruMap.get(r.nip) || (r.namaGuru ? guruMap.get(r.namaGuru.trim().toLowerCase()) : null);
+                
+                if (isBlankMasuk) {
+                    const shiftCfg = this.getShiftKerjaConfig(guru, r.tanggal);
+                    const defaultMasuk = shiftCfg.masuk || '07:30';
+                    r.jamMasuk = defaultMasuk;
+                    r.jam_masuk = defaultMasuk;
+                }
+                if (isAlpa) {
+                    r.status = 'Hadir';
+                }
+                r.keterangan = 'Presensi Masuk Tercatat';
+                hasChanges = true;
+
+                // Sinkronkan pemulihan langsung ke Firestore presensi_guru
+                try {
+                    if (typeof db !== 'undefined' && r.tanggal && r.nip) {
+                        const parts = r.tanggal.split('/');
+                        if (parts.length === 3) {
+                            const docId = `${parts[2]}${parts[1]}${parts[0]}_${r.nip}`;
+                            db.collection('presensi_guru').doc(docId).set({
+                                jamMasuk: r.jamMasuk,
+                                jam_masuk: r.jamMasuk,
+                                status: r.status,
+                                keterangan: r.keterangan
+                            }, { merge: true }).catch(() => {});
+                        }
+                    }
+                } catch(e) {}
+            }
+        });
+
         this.mockData.riwayat = this.mockData.riwayat.filter(r => {
+            const hasFoto = this.isPresensiAdaFoto(r);
+            if (hasFoto) return true; // Record dengan foto BUKAN system ALPA
+
             const isAlpa = (r.status || '').toUpperCase() === 'ALPA';
             const isSystemAlpa = isAlpa && (
                 (r.keterangan || '').toLowerCase().includes('sistem') ||
@@ -1667,7 +1749,7 @@ service cloud.firestore {
             return true;
         });
 
-        if (this.mockData.riwayat.length !== initialCount) {
+        if (this.mockData.riwayat.length !== initialCount || hasChanges) {
             hasChanges = true;
             localStorage.setItem(APP_STORAGE_KEY, JSON.stringify(this.mockData));
         }
@@ -1775,6 +1857,28 @@ service cloud.firestore {
                         const matchTgl = r.tanggal === tglStr;
                         const isAlpa = (r.status || '').toUpperCase() === 'ALPA';
                         if (matchGuru && matchTgl && isAlpa) {
+                            if (this.isPresensiAdaFoto(r)) {
+                                r.status = 'Hadir';
+                                const shiftCfg = this.getShiftKerjaConfig(guru, r.tanggal);
+                                if (!r.jamMasuk || r.jamMasuk === '--:--' || r.jamMasuk === '-') {
+                                    r.jamMasuk = shiftCfg.masuk || '07:30';
+                                    r.jam_masuk = r.jamMasuk;
+                                }
+                                r.keterangan = 'Presensi Masuk Tercatat';
+                                removed = true;
+                                const docId = `${checkYear}${checkMonth.toString().padStart(2, '0')}${d.toString().padStart(2, '0')}_${nip}`;
+                                try {
+                                    if (typeof db !== 'undefined' && !this.state.firebasePermissionError) {
+                                        db.collection('presensi_guru').doc(docId).set({
+                                            status: r.status,
+                                            jamMasuk: r.jamMasuk,
+                                            jam_masuk: r.jamMasuk,
+                                            keterangan: r.keterangan
+                                        }, { merge: true }).catch(() => {});
+                                    }
+                                } catch(e) {}
+                                return true;
+                            }
                             removed = true;
                             this.hapusDokumenFirestorePresensi(r);
                             return false;
@@ -1798,48 +1902,9 @@ service cloud.firestore {
 
                 // Kondisi 8: Waktu presensi yang diwajibkan telah berakhir sesuai aturan jam kerja
                 if (isToday) {
-                    const shiftRaw = String(guru.shift || guru.shiftKerja || guru.jamKerja || 'Pagi').trim().toLowerCase();
-                    const isSiang = shiftRaw.includes('siang');
-                    const dayOfWeek = checkDate.getDay();
-                    const cfgLokasi = this.mockData.lokasiDanJamKerja || {};
-                    const cfgJk = cfgLokasi.jamKerja || {};
-                    const shiftCfg = isSiang ? (cfgJk.siang || {}) : (cfgJk.pagi || {});
-
-                    let defaultPulang = isSiang ? (dayOfWeek === 5 ? '17:30' : '17:00') : (dayOfWeek === 5 ? '11:30' : '12:00');
-                    let jamPulangStr = defaultPulang;
-
-                    if (dayOfWeek === 5) { // Hari Jumat
-                        jamPulangStr = shiftCfg.jumat?.pulang || defaultPulang;
-                        const domEl = document.getElementById(isSiang ? 'pengaturan-jam-pulang-siang-jumat' : 'pengaturan-jam-pulang-pagi-jumat');
-                        if (domEl && domEl.value) jamPulangStr = domEl.value;
-                    } else if (dayOfWeek === 6) { // Hari Sabtu
-                        jamPulangStr = shiftCfg.sabtu?.pulang || defaultPulang;
-                        const domEl = document.getElementById(isSiang ? 'pengaturan-jam-pulang-siang-sabtu' : 'pengaturan-jam-pulang-pagi-sabtu');
-                        if (domEl && domEl.value) jamPulangStr = domEl.value;
-                    } else { // Hari Senin - Kamis
-                        jamPulangStr = shiftCfg.seninKamis?.pulang || defaultPulang;
-                        const domEl = document.getElementById(isSiang ? 'pengaturan-jam-pulang-siang' : 'pengaturan-jam-pulang-pagi');
-                        if (domEl && domEl.value) jamPulangStr = domEl.value;
-                    }
-
-                    let [hP, mP] = (jamPulangStr || defaultPulang).split(':').map(Number);
-                    if (isNaN(hP)) hP = isSiang ? 17 : (dayOfWeek === 5 ? 11 : 12);
-                    if (isNaN(mP)) mP = (isSiang && dayOfWeek === 5) ? 30 : ((!isSiang && dayOfWeek === 5) ? 30 : 0);
-                    const pulangTotalMin = (hP * 60) + mP;
-
-                    // Batas waktu berakhirnya jam kerja hari ini:
-                    // Untuk Shift Siang: jam kerja berakhir pada jam pulang sore (17:00 / Jumat 17:30 atau sesuai setting).
-                    // Untuk Shift Pagi: jam kepulangan siswa (11:30 Jumat / 12:00 Senin-Kamis) merupakan awal dibukanya presensi kepulangan,
-                    // dan jam kerja aktif guru di sekolah minimal berlangsung hingga pukul 14:00 (Jumat & Senin-Kamis) atau 13:00 (Sabtu),
-                    // atau sesuai jam pulang yang diatur admin jika disetel lebih sore.
-                    let jamKerjaSelesaiTotalMin = pulangTotalMin;
-                    if (!isSiang) {
-                        const minSelesaiPagi = (dayOfWeek === 6 ? 13 : 14) * 60;
-                        jamKerjaSelesaiTotalMin = Math.max(minSelesaiPagi, pulangTotalMin);
-                    }
-
+                    const shiftInfo = this.getShiftKerjaConfig(guru, checkDate);
                     // Jangan menetapkan ALPA jika jam kerja hari ini belum berakhir (berlaku untuk Shift Pagi maupun Shift Siang)
-                    if (currentTotalMin < jamKerjaSelesaiTotalMin) {
+                    if (currentTotalMin < shiftInfo.jamKerjaSelesaiMenit) {
                         removeSystemAlpa();
                         return;
                     }
@@ -1865,12 +1930,53 @@ service cloud.firestore {
 
                 // Jika seluruh kondisi terpenuhi -> Tetapkan status ALPA secara otomatis
                 const recordExists = this.mockData.riwayat.find(r => 
-                    ((r.nip && (r.nip === nip || r.nip === guru.nip || r.nip === guru.username)) || 
+                    ((r.nip && (r.nip === nip || r.nip === guru.nip || r.nip === guru.username || r.nip === guru.id)) || 
                      (r.namaGuru && nama && r.namaGuru.trim().toLowerCase() === nama.trim().toLowerCase())) && 
                     r.tanggal === tglStr
                 );
 
-                if (!recordExists) {
+                if (recordExists) {
+                    const hasFoto = this.isPresensiAdaFoto(recordExists);
+                    const hasJamMasuk = recordExists.jamMasuk && recordExists.jamMasuk !== '--:--' && recordExists.jamMasuk !== '-';
+                    
+                    if (hasFoto || hasJamMasuk) {
+                        // Guru memiliki bukti presensi aktual! Pastikan tidak berstatus ALPA
+                        if ((recordExists.status || '').toUpperCase() === 'ALPA') {
+                            recordExists.status = 'Hadir';
+                            recordExists.keterangan = 'Presensi Masuk Tercatat';
+                            if (!hasJamMasuk) {
+                                const shiftCfg = this.getShiftKerjaConfig(guru, recordExists.tanggal);
+                                recordExists.jamMasuk = shiftCfg.masuk || '07:30';
+                                recordExists.jam_masuk = recordExists.jamMasuk;
+                            }
+                            hasChanges = true;
+                            const docId = `${checkYear}${checkMonth.toString().padStart(2, '0')}${d.toString().padStart(2, '0')}_${nip}`;
+                            try {
+                                if (typeof db !== 'undefined' && !this.state.firebasePermissionError) {
+                                    db.collection('presensi_guru').doc(docId).set({
+                                        status: recordExists.status,
+                                        jamMasuk: recordExists.jamMasuk,
+                                        jam_masuk: recordExists.jamMasuk,
+                                        keterangan: recordExists.keterangan
+                                    }, { merge: true }).catch(() => {});
+                                }
+                            } catch(e) {}
+                        }
+                        return; // Jangan buat ALPA!
+                    }
+
+                    if ((recordExists.status || '').toUpperCase() !== 'ALPA' && (recordExists.status || '').toUpperCase().includes('BELUM')) {
+                        recordExists.status = 'ALPA';
+                        recordExists.keterangan = 'Sistem: Tidak ada presensi masuk';
+                        hasChanges = true;
+                        const docId = `${checkYear}${checkMonth.toString().padStart(2, '0')}${d.toString().padStart(2, '0')}_${nip}`;
+                        try {
+                            if (typeof db !== 'undefined' && !this.state.firebasePermissionError) {
+                                db.collection('presensi_guru').doc(docId).set(recordExists, { merge: true }).catch(() => {});
+                            }
+                        } catch(e) {}
+                    }
+                } else {
                     const alpaRecord = {
                         tanggal: tglStr,
                         nip: nip,
@@ -1887,21 +1993,40 @@ service cloud.firestore {
                     this.mockData.riwayat.push(alpaRecord);
                     hasChanges = true;
 
-                    // Sinkronisasi data ke Firestore presensi_guru
+                    // Sinkronisasi data ke Firestore presensi_guru secara aman (hindari menimpa bukti foto presensi riil)
                     const docId = `${checkYear}${checkMonth.toString().padStart(2, '0')}${d.toString().padStart(2, '0')}_${nip}`;
                     try {
                         if (typeof db !== 'undefined' && !this.state.firebasePermissionError) {
-                            db.collection('presensi_guru').doc(docId).set(alpaRecord, { merge: true }).catch(() => {});
-                        }
-                    } catch(e) {}
-                } else if ((recordExists.status || '').toUpperCase() !== 'ALPA' && (recordExists.status || '').toUpperCase().includes('BELUM')) {
-                    recordExists.status = 'ALPA';
-                    recordExists.keterangan = 'Sistem: Tidak ada presensi masuk';
-                    hasChanges = true;
-                    const docId = `${checkYear}${checkMonth.toString().padStart(2, '0')}${d.toString().padStart(2, '0')}_${nip}`;
-                    try {
-                        if (typeof db !== 'undefined' && !this.state.firebasePermissionError) {
-                            db.collection('presensi_guru').doc(docId).set(recordExists, { merge: true }).catch(() => {});
+                            db.collection('presensi_guru').doc(docId).get().then(snap => {
+                                if (snap.exists) {
+                                    const ex = snap.data();
+                                    const exHasFoto = this.isPresensiAdaFoto(ex);
+                                    const exHasJam = ex && ex.jamMasuk && ex.jamMasuk !== '--:--' && ex.jamMasuk !== '-';
+                                    const exNotAlpa = ex && ex.status && ex.status.toUpperCase() !== 'ALPA';
+
+                                    if (ex && (exHasFoto || exHasJam || exNotAlpa)) {
+                                        Object.assign(alpaRecord, ex);
+                                        if (exHasFoto || exHasJam) {
+                                            alpaRecord.status = exNotAlpa ? ex.status : 'Hadir';
+                                            if (!alpaRecord.jamMasuk || alpaRecord.jamMasuk === '--:--' || alpaRecord.jamMasuk === '-') {
+                                                const shiftCfg = this.getShiftKerjaConfig(guru, alpaRecord.tanggal);
+                                                alpaRecord.jamMasuk = shiftCfg.masuk || '07:30';
+                                                alpaRecord.jam_masuk = alpaRecord.jamMasuk;
+                                            }
+                                            db.collection('presensi_guru').doc(docId).set({
+                                                status: alpaRecord.status,
+                                                jamMasuk: alpaRecord.jamMasuk,
+                                                jam_masuk: alpaRecord.jamMasuk
+                                            }, { merge: true }).catch(() => {});
+                                        }
+                                        localStorage.setItem(APP_STORAGE_KEY, JSON.stringify(this.mockData));
+                                        return;
+                                    }
+                                }
+                                db.collection('presensi_guru').doc(docId).set(alpaRecord, { merge: true }).catch(() => {});
+                            }).catch(() => {
+                                db.collection('presensi_guru').doc(docId).set(alpaRecord, { merge: true }).catch(() => {});
+                            });
                         }
                     } catch(e) {}
                 }
@@ -2152,7 +2277,7 @@ service cloud.firestore {
                     });
                 } else {
                     // Cek apakah Guru
-                    const guru = this.mockData.dataGuru.find(g => g.username === username);
+                    const guru = this.mockData.dataGuru.find(g => g.username === username || (g.nip && g.nip === username) || (g.id && g.id === username));
                     if (guru && guru.password === password) {
                         if (guru.statusAkun !== 'Aktif') {
                             onSuccess({success: false, message: 'Akun dinonaktifkan. Hubungi admin.'});
@@ -2167,6 +2292,7 @@ service cloud.firestore {
                                     nip: guru.nip,
                                     id: guru.id,
                                     jabatan: guru.jabatan || 'Guru',
+                                    shift: guru.shift || 'Pagi',
                                     fotoUrl: guru.fotoUrl
                                 }
                             });
@@ -2369,7 +2495,7 @@ service cloud.firestore {
 
             let todayRecord = this.mockData.riwayat.find(r => 
                 r.tanggal === tglString && 
-                ((r.nip && (r.nip === myNip || r.nip === userInfo.nip || r.nip === userInfo.username)) || 
+                ((r.nip && (r.nip === myNip || r.nip === userInfo.nip || r.nip === userInfo.username || r.nip === userInfo.id)) || 
                  (r.namaGuru && myNama && r.namaGuru.trim().toLowerCase() === myNama.trim().toLowerCase()))
             );
             
@@ -2379,9 +2505,25 @@ service cloud.firestore {
             let todayJarak = null;
             
             if (todayRecord) {
+                const hasFoto = this.isPresensiAdaFoto(todayRecord);
+                
                 todayMasuk = todayRecord.jamMasuk || todayRecord.jam_masuk || '--:--';
                 todayPulang = todayRecord.jamPulang || todayRecord.jam_pulang || '--:--';
                 todayStatus = todayRecord.status || 'Hadir';
+
+                if (hasFoto && (todayStatus.toUpperCase() === 'ALPA' || todayMasuk === '--:--')) {
+                    const shiftCfg = this.getShiftKerjaConfig(latestGuru || userInfo, now);
+                    if (todayMasuk === '--:--') {
+                        todayMasuk = shiftCfg.masuk || '07:30';
+                        todayRecord.jamMasuk = todayMasuk;
+                        todayRecord.jam_masuk = todayMasuk;
+                    }
+                    if (todayStatus.toUpperCase() === 'ALPA') {
+                        todayStatus = 'Hadir';
+                        todayRecord.status = 'Hadir';
+                    }
+                }
+
                 todayJarak = todayRecord.jarakPulang !== null && todayRecord.jarakPulang !== undefined ? todayRecord.jarakPulang : todayRecord.jarakMasuk;
             } else {
                 if (this.isHariLiburMingguan(now)) {
@@ -2394,11 +2536,16 @@ service cloud.firestore {
             const currentMonthStr = `/${(now.getMonth()+1).toString().padStart(2, '0')}/${now.getFullYear()}`;
             let myHadir = 0, myTerlambat = 0, myIzin = 0, mySakit = 0, myCuti = 0, myAlpa = 0;
             this.mockData.riwayat.forEach(r => {
-                const matchMe = (r.nip && (r.nip === myNip || r.nip === userInfo.nip || r.nip === userInfo.username)) || 
+                const matchMe = (r.nip && (r.nip === myNip || r.nip === userInfo.nip || r.nip === userInfo.username || r.nip === userInfo.id)) || 
                                 (r.namaGuru && myNama && r.namaGuru.trim().toLowerCase() === myNama.trim().toLowerCase());
                 if(matchMe && (r.tanggal || '').endsWith(currentMonthStr)) {
-                    const s = (r.status || '').toUpperCase();
+                    let s = (r.status || '').toUpperCase();
                     const isLibur = this.isTanggalLibur(r.tanggal);
+                    const hasFoto = this.isPresensiAdaFoto(r);
+                    if (hasFoto && (s === 'ALPA' || !s)) {
+                        s = 'HADIR';
+                    }
+
                     if(s === 'HADIR' || s === 'SELESAI' || s === 'DI LUAR LOKASI') {
                         myHadir++;
                     } else if(s.includes('TERLAMBAT')) {
@@ -2717,75 +2864,29 @@ service cloud.firestore {
 
         // Ambil profil guru untuk mengecek shift
         const currentUser = this.state.currentUser || JSON.parse(localStorage.getItem('user_info') || '{}');
-        if (!currentUser || !currentUser.id) {
+        if (!currentUser || (!currentUser.id && !currentUser.username && !currentUser.nip)) {
             this.showToast('Gagal memuat profil pengguna. Silakan login ulang.', 'error', 'text-red-400');
             return;
         }
-        const guruProfile = this.mockData.dataGuru.find(g => g.id === currentUser.id);
-        const shiftGuru = guruProfile ? (guruProfile.shift || 'Pagi') : 'Pagi';
+        const guruProfile = (this.mockData.dataGuru || []).find(g => 
+            (currentUser.id && g.id === currentUser.id) || 
+            (currentUser.username && g.username === currentUser.username) || 
+            (currentUser.nip && g.nip && g.nip !== '-' && g.nip === currentUser.nip) ||
+            (currentUser.nama && g.nama && g.nama.trim().toLowerCase() === currentUser.nama.trim().toLowerCase())
+        );
+        const shiftGuru = guruProfile?.shift || currentUser.shift || 'Pagi';
         const isShiftSiang = String(shiftGuru || '').toLowerCase().includes('siang');
 
-        // Cek terlambat (hanya saat presensi masuk)
-        const cfgLokasi = this.mockData.lokasiDanJamKerja || {};
-        const cfgJk = cfgLokasi.jamKerja || {};
-        const shiftCfg = isShiftSiang ? (cfgJk.siang || {}) : (cfgJk.pagi || {});
+        // Ambil konfigurasi jam shift kerja terintegrasi dari Lokasi & Jam Kerja
+        const shiftCfg = this.getShiftKerjaConfig(guruProfile || currentUser, jamSekarang);
+        const totalMenitSekarang = (jamSekarang.getHours() * 60) + jamSekarang.getMinutes();
 
         if (this.presensiState.tipe === 'Masuk') {
-            const dayOfWeek = jamSekarang.getDay();
-            let idInputMasuk = isShiftSiang ? 'pengaturan-jam-masuk-siang' : 'pengaturan-jam-masuk-pagi';
-            let jamMasukStr = (shiftCfg.seninKamis && shiftCfg.seninKamis.masuk) || (isShiftSiang ? '13:00' : '07:30'); 
-            
-            if (dayOfWeek === 5) { // Jumat
-                const jumatEl = document.getElementById(isShiftSiang ? 'pengaturan-jam-masuk-siang-jumat' : 'pengaturan-jam-masuk-pagi-jumat');
-                if (jumatEl && jumatEl.value) jamMasukStr = jumatEl.value;
-                else if (shiftCfg.jumat && shiftCfg.jumat.masuk) jamMasukStr = shiftCfg.jumat.masuk;
-            } else if (dayOfWeek === 6) { // Sabtu
-                const sabtuEl = document.getElementById(isShiftSiang ? 'pengaturan-jam-masuk-siang-sabtu' : 'pengaturan-jam-masuk-pagi-sabtu');
-                if (sabtuEl && sabtuEl.value) jamMasukStr = sabtuEl.value;
-                else if (shiftCfg.sabtu && shiftCfg.sabtu.masuk) jamMasukStr = shiftCfg.sabtu.masuk;
-            } else {
-                const jamMasukEl = document.getElementById(idInputMasuk);
-                if (jamMasukEl && jamMasukEl.value) jamMasukStr = jamMasukEl.value;
-                else if (shiftCfg.seninKamis && shiftCfg.seninKamis.masuk) jamMasukStr = shiftCfg.seninKamis.masuk;
-            }
-
-            const toleransiEl = document.getElementById('pengaturan-toleransi');
-            const toleransi = toleransiEl ? (parseInt(toleransiEl.value) || 0) : (cfgJk.toleransi !== undefined ? cfgJk.toleransi : 15);
-
-            const [jamM, mntM] = jamMasukStr.split(':').map(Number);
-            const batasMenitNormal = (jamM * 60) + mntM + toleransi;
-
-            const totalMenitSekarang = (jamSekarang.getHours() * 60) + jamSekarang.getMinutes();
-
-            if (totalMenitSekarang > batasMenitNormal) {
+            if (totalMenitSekarang > shiftCfg.batasMasukMenit) {
                 isTerlambat = true;
             }
         } else if (this.presensiState.tipe === 'Pulang') {
-            // Cek pulang cepat
-            const dayOfWeek = jamSekarang.getDay();
-            let idInputPulang = isShiftSiang ? 'pengaturan-jam-pulang-siang' : 'pengaturan-jam-pulang-pagi';
-            let jamPulangStr = (shiftCfg.seninKamis && shiftCfg.seninKamis.pulang) || (isShiftSiang ? '17:00' : '12:00'); 
-            
-            // Check specific days
-            if (dayOfWeek === 5) { // Jumat
-                const jumatEl = document.getElementById(isShiftSiang ? 'pengaturan-jam-pulang-siang-jumat' : 'pengaturan-jam-pulang-pagi-jumat');
-                if (jumatEl && jumatEl.value) jamPulangStr = jumatEl.value;
-                else if (shiftCfg.jumat && shiftCfg.jumat.pulang) jamPulangStr = shiftCfg.jumat.pulang;
-            } else if (dayOfWeek === 6) { // Sabtu
-                const sabtuEl = document.getElementById(isShiftSiang ? 'pengaturan-jam-pulang-siang-sabtu' : 'pengaturan-jam-pulang-pagi-sabtu');
-                if (sabtuEl && sabtuEl.value) jamPulangStr = sabtuEl.value;
-                else if (shiftCfg.sabtu && shiftCfg.sabtu.pulang) jamPulangStr = shiftCfg.sabtu.pulang;
-            } else {
-                const jamPulangEl = document.getElementById(idInputPulang);
-                if (jamPulangEl && jamPulangEl.value) jamPulangStr = jamPulangEl.value;
-                else if (shiftCfg.seninKamis && shiftCfg.seninKamis.pulang) jamPulangStr = shiftCfg.seninKamis.pulang;
-            }
-            
-            const [jamP, mntP] = jamPulangStr.split(':').map(Number);
-            const batasMenitPulang = (jamP * 60) + mntP;
-            const totalMenitSekarang = (jamSekarang.getHours() * 60) + jamSekarang.getMinutes();
-
-            if (totalMenitSekarang < batasMenitPulang) {
+            if (totalMenitSekarang < shiftCfg.jamPulangMenit) {
                 isPulangCepat = true;
             }
         }
@@ -2909,33 +3010,46 @@ service cloud.firestore {
                         const docRef = db.collection('presensi_guru').doc(docId);
                         
                         // 1. Cek status dari memori lokal (tanpa perlu loading network GET)
-                        let existingLocal = this.mockData.riwayat.find(r => r.tanggal === tglString && r.nip === (userInfo.username || userInfo.nip));
+                        let existingLocal = this.mockData.riwayat.find(r => 
+                            r.tanggal === tglString && (
+                                (r.nip && (r.nip === userInfo.username || r.nip === userInfo.nip || r.nip === userInfo.id)) ||
+                                (r.namaGuru && userInfo.nama && r.namaGuru.trim().toLowerCase() === userInfo.nama.trim().toLowerCase())
+                            )
+                        );
                         
                         // 2. Siapkan payload Data yang akan dikirim (blind merge update)
                         let updatePayload = {
                             tanggal: tglString,
-                            nip: userInfo.username || userInfo.nip || '-',
+                            nip: userInfo.username || userInfo.nip || userInfo.id || '-',
                             namaGuru: userInfo.nama || 'Guru',
                         };
 
                         if (payload.tipe === 'Masuk') {
-                            updatePayload.jamMasuk = `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}`;
+                            const nowHour = now.getHours().toString().padStart(2, '0');
+                            const nowMin = now.getMinutes().toString().padStart(2, '0');
+                            updatePayload.jamMasuk = `${nowHour}:${nowMin}`;
+                            updatePayload.jam_masuk = `${nowHour}:${nowMin}`;
                             updatePayload.fotoMasuk = payload.foto;
                             updatePayload.jarakMasuk = payload.jarak;
                             updatePayload.status = payload.status === 'HADIR' ? 'Hadir' : (payload.status.includes('TERLAMBAT') ? 'Terlambat' : 'Di Luar Lokasi');
+                            updatePayload.keterangan = 'Presensi Masuk Tercatat';
                             
                             // Isi default jam pulang jika belum ada
-                            if (!existingLocal) {
+                            if (!existingLocal || !existingLocal.jamPulang) {
                                 updatePayload.jamPulang = '--:--';
+                                updatePayload.jam_pulang = '--:--';
                                 updatePayload.fotoPulang = '';
                                 updatePayload.jarakPulang = null;
                             }
                         } else if (payload.tipe === 'Pulang') {
-                            updatePayload.jamPulang = `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}`;
+                            const nowHour = now.getHours().toString().padStart(2, '0');
+                            const nowMin = now.getMinutes().toString().padStart(2, '0');
+                            updatePayload.jamPulang = `${nowHour}:${nowMin}`;
+                            updatePayload.jam_pulang = `${nowHour}:${nowMin}`;
                             updatePayload.fotoPulang = payload.foto;
                             updatePayload.jarakPulang = payload.jarak;
                             
-                            let currentStatus = existingLocal ? existingLocal.status : 'Alpa';
+                            let currentStatus = existingLocal ? existingLocal.status : 'Hadir';
                             if(currentStatus !== 'Terlambat' && currentStatus !== 'Di Luar Lokasi') {
                                  updatePayload.status = 'Selesai';
                             }
@@ -2948,7 +3062,6 @@ service cloud.firestore {
                             this.mockData.riwayat.unshift(updatePayload);
                         }
                         localStorage.setItem(APP_STORAGE_KEY, JSON.stringify(this.mockData));
-                        this.autoGenerateAlpa();
 
                         // 3. Tulis langsung ke server tanpa antrean (Metode Fire & Forget)
                         await docRef.set(updatePayload, { merge: true });
@@ -3368,6 +3481,78 @@ service cloud.firestore {
         if (tabId === 'libur') {
             this.renderHariLibur();
         }
+    },
+
+    getShiftKerjaConfig(guruOrShift, dateObj = new Date()) {
+        let shiftStr = 'Pagi';
+        if (typeof guruOrShift === 'string') {
+            shiftStr = guruOrShift;
+        } else if (guruOrShift && typeof guruOrShift === 'object') {
+            shiftStr = guruOrShift.shift || guruOrShift.shiftKerja || guruOrShift.jamKerja || 'Pagi';
+        }
+        const isSiang = String(shiftStr || '').trim().toLowerCase().includes('siang');
+        
+        const cfgLokasi = this.mockData?.lokasiDanJamKerja || {};
+        const cfgJk = cfgLokasi.jamKerja || {};
+        const shiftCfg = isSiang ? (cfgJk.siang || {}) : (cfgJk.pagi || {});
+        
+        let dObj = dateObj;
+        if (typeof dateObj === 'string') {
+            if (dateObj.includes('/')) {
+                const parts = dateObj.split('/');
+                if (parts.length === 3) dObj = new Date(Number(parts[2]), Number(parts[1]) - 1, Number(parts[0]));
+            } else {
+                dObj = new Date(dateObj);
+            }
+        }
+        if (!(dObj instanceof Date) || isNaN(dObj.getTime())) dObj = new Date();
+        const dayOfWeek = dObj.getDay();
+        
+        let masuk = isSiang ? '13:00' : '07:30';
+        let pulang = isSiang ? (dayOfWeek === 5 ? '17:30' : '17:00') : (dayOfWeek === 5 ? '11:30' : '12:00');
+        
+        if (dayOfWeek === 5) { // Jumat
+            masuk = shiftCfg.jumat?.masuk || (isSiang ? '13:30' : '07:30');
+            pulang = shiftCfg.jumat?.pulang || (isSiang ? '17:30' : '11:30');
+        } else if (dayOfWeek === 6) { // Sabtu
+            masuk = shiftCfg.sabtu?.masuk || (isSiang ? '13:00' : '07:30');
+            pulang = shiftCfg.sabtu?.pulang || (isSiang ? '17:00' : '12:00');
+        } else { // Senin - Kamis
+            masuk = shiftCfg.seninKamis?.masuk || (isSiang ? '13:00' : '07:30');
+            pulang = shiftCfg.seninKamis?.pulang || (isSiang ? '17:00' : '12:00');
+        }
+        
+        const toleransi = parseInt(cfgJk.toleransi !== undefined ? cfgJk.toleransi : 15) || 0;
+        const [jamM, minM] = masuk.split(':').map(Number);
+        const batasMasukMenit = (jamM * 60) + (isNaN(minM) ? 0 : minM) + toleransi;
+        
+        const [jamP, minP] = pulang.split(':').map(Number);
+        const jamPulangMenit = (jamP * 60) + (isNaN(minP) ? 0 : minP);
+        
+        let jamKerjaSelesaiMenit = jamPulangMenit;
+        if (!isSiang) {
+            const minSelesaiPagi = (dayOfWeek === 6 ? 13 : 14) * 60;
+            jamKerjaSelesaiMenit = Math.max(minSelesaiPagi, jamPulangMenit);
+        }
+        
+        return {
+            shift: isSiang ? 'Siang' : 'Pagi',
+            isSiang,
+            masuk,
+            pulang,
+            toleransi,
+            batasMasukMenit,
+            jamPulangMenit,
+            jamKerjaSelesaiMenit
+        };
+    },
+
+    isPresensiAdaFoto(r) {
+        if (!r) return false;
+        const fm = r.fotoMasuk || r.foto_masuk || r.foto;
+        const fp = r.fotoPulang || r.foto_pulang;
+        const isValid = (v) => v && typeof v === 'string' && v.trim() !== '' && v !== '-' && v !== '#';
+        return !!(isValid(fm) || isValid(fp));
     },
 
     renderHariLibur() {
@@ -3986,13 +4171,24 @@ service cloud.firestore {
                     return dateB.localeCompare(dateA);
                 })
                 .map(r => {
+                    let st = r.status || 'Hadir';
+                    let jMasuk = r.jamMasuk || r.jam_masuk || '--:--';
+                    let jPulang = r.jamPulang || r.jam_pulang || '--:--';
+                    const hasFoto = this.isPresensiAdaFoto(r);
+                    if (hasFoto && (st.toUpperCase() === 'ALPA' || jMasuk === '--:--')) {
+                        st = 'Hadir';
+                        if (jMasuk === '--:--') {
+                            const shiftCfg = this.getShiftKerjaConfig(userInfo, r.tanggal);
+                            jMasuk = shiftCfg.masuk || '07:30';
+                        }
+                    }
                     return {
                         tanggal: r.tanggal || '-',
-                        jam_masuk: r.jamMasuk || r.jam_masuk || '--:--',
-                        jam_pulang: r.jamPulang || r.jam_pulang || '--:--',
-                        status: r.status || 'Hadir',
-                        foto_masuk: r.fotoMasuk || '',
-                        foto_pulang: r.fotoPulang || ''
+                        jam_masuk: jMasuk,
+                        jam_pulang: jPulang,
+                        status: st,
+                        foto_masuk: r.fotoMasuk || r.foto_masuk || '',
+                        foto_pulang: r.fotoPulang || r.foto_pulang || ''
                     };
                 });
             
@@ -4042,11 +4238,16 @@ service cloud.firestore {
         const rekapData = (this.mockData.dataGuru || []).map(guru => {
             let hadir = 0, terlambat = 0, izin = 0, sakit = 0, cuti = 0, alpa = 0;
             (this.mockData.riwayat || []).forEach(r => {
-                const matchGuru = (r.nip && (r.nip === guru.username || r.nip === guru.nip)) || 
+                const matchGuru = (r.nip && (r.nip === guru.username || r.nip === guru.nip || r.nip === guru.id)) || 
                                   (r.namaGuru && guru.nama && r.namaGuru.trim().toLowerCase() === guru.nama.trim().toLowerCase());
                 if(matchGuru && (r.tanggal || '').endsWith(filterMonthStr)) {
-                    const stat = (r.status || '').toUpperCase();
+                    let stat = (r.status || '').toUpperCase();
                     const isLibur = this.isTanggalLibur(r.tanggal);
+                    const hasFoto = this.isPresensiAdaFoto(r);
+
+                    if (hasFoto && (stat === 'ALPA' || !stat)) {
+                        stat = 'HADIR';
+                    }
 
                     if(stat === 'HADIR' || stat === 'SELESAI' || stat === 'DI LUAR LOKASI') {
                         hadir++;
@@ -4094,10 +4295,14 @@ service cloud.firestore {
         
         const sudahPresensi = presensiHariIni.filter(r => {
             const s = (r.status || '').toUpperCase();
-            return s.includes('HADIR') || s.includes('TERLAMBAT') || s.includes('SELESAI') || s.includes('DI LUAR LOKASI');
+            const hasFoto = this.isPresensiAdaFoto(r);
+            return hasFoto || s.includes('HADIR') || s.includes('TERLAMBAT') || s.includes('SELESAI') || s.includes('DI LUAR LOKASI');
         }).length;
         const terlambat = presensiHariIni.filter(r => (r.status || '').toUpperCase().includes('TERLAMBAT')).length;
-        const alpaHariIni = isTodayLibur ? 0 : presensiHariIni.filter(r => (r.status || '').toUpperCase() === 'ALPA').length;
+        const alpaHariIni = isTodayLibur ? 0 : presensiHariIni.filter(r => {
+            if (this.isPresensiAdaFoto(r)) return false;
+            return (r.status || '').toUpperCase() === 'ALPA';
+        }).length;
         const izinHariIni = isTodayLibur ? 0 : presensiHariIni.filter(r => {
             const s = (r.status || '').toUpperCase();
             return s === 'IZIN' || s === 'SAKIT' || s === 'CUTI';
@@ -4458,7 +4663,12 @@ service cloud.firestore {
             filteredRiwayat = filteredRiwayat.filter(r => (r.tanggal || '').endsWith(filterMonthStr));
         }
         if (filterStatus) {
-            filteredRiwayat = filteredRiwayat.filter(r => (r.status || '').toUpperCase() === filterStatus.toUpperCase() || (r.status || '').toUpperCase().includes(filterStatus.toUpperCase()));
+            filteredRiwayat = filteredRiwayat.filter(r => {
+                let st = (r.status || '').toUpperCase();
+                const hasFoto = this.isPresensiAdaFoto(r);
+                if (hasFoto && (st === 'ALPA' || !st)) st = 'HADIR';
+                return st === filterStatus.toUpperCase() || st.includes(filterStatus.toUpperCase());
+            });
         }
         if (filterGuru) {
             const fg = filterGuru.toLowerCase();
@@ -4477,19 +4687,30 @@ service cloud.firestore {
 
         const dataRiwayat = filteredRiwayat.map(r => {
             let nip = r.nip || '-';
-            const guruInfo = this.mockData.dataGuru.find(g => g.username === r.nip || g.nip === r.nip || (g.nama && r.namaGuru && g.nama.trim().toLowerCase() === r.namaGuru.trim().toLowerCase()));
+            const guruInfo = this.mockData.dataGuru.find(g => g.username === r.nip || g.nip === r.nip || g.id === r.nip || (g.nama && r.namaGuru && g.nama.trim().toLowerCase() === r.namaGuru.trim().toLowerCase()));
             if (guruInfo) {
                 nip = (guruInfo.nip && guruInfo.nip !== '-') ? guruInfo.nip : (guruInfo.username || nip);
+            }
+            let st = r.status || 'Hadir';
+            let jMasuk = r.jamMasuk || r.jam_masuk || '--:--';
+            let jPulang = r.jamPulang || r.jam_pulang || '--:--';
+            const hasFoto = this.isPresensiAdaFoto(r);
+            if (hasFoto && (st.toUpperCase() === 'ALPA' || jMasuk === '--:--')) {
+                st = 'Hadir';
+                if (jMasuk === '--:--') {
+                    const shiftCfg = this.getShiftKerjaConfig(guruInfo, r.tanggal);
+                    jMasuk = shiftCfg.masuk || '07:30';
+                }
             }
             return {
                 tanggal: r.tanggal,
                 nip: nip,
                 nama: r.namaGuru || '-',
-                jam_masuk: r.jamMasuk || r.jam_masuk || '--:--',
-                jam_pulang: r.jamPulang || r.jam_pulang || '--:--',
-                status: r.status,
-                foto_masuk: r.fotoMasuk || '',
-                foto_pulang: r.fotoPulang || ''
+                jam_masuk: jMasuk,
+                jam_pulang: jPulang,
+                status: st,
+                foto_masuk: r.fotoMasuk || r.foto_masuk || '',
+                foto_pulang: r.fotoPulang || r.foto_pulang || ''
             };
         });
         setTimeout(() => onSuccess({ success: true, data: dataRiwayat }), 100);
@@ -4605,7 +4826,11 @@ service cloud.firestore {
                 });
 
                 if (r) {
-                    const st = (r.status || '').toUpperCase();
+                    let st = (r.status || '').toUpperCase();
+                    const hasFoto = this.isPresensiAdaFoto(r);
+                    if (hasFoto && (st === 'ALPA' || !st)) {
+                        st = 'HADIR';
+                    }
                     if (st.includes('TERLAMBAT')) {
                         code = 'T';
                     } else if (st === 'HADIR' || st === 'SELESAI' || st === 'DI LUAR LOKASI') {
@@ -4625,6 +4850,8 @@ service cloud.firestore {
                             code = (isBeforeDaftar || isBeforeSekolah) ? '-' : 'A';
                         }
                     } else if (r.jamMasuk && r.jamMasuk !== '--:--' && r.jamMasuk !== '-') {
+                        code = 'H';
+                    } else if (hasFoto) {
                         code = 'H';
                     }
                 }
@@ -4674,29 +4901,9 @@ service cloud.firestore {
                                     if (isBeforeDaftar || isBeforeSekolah) {
                                         code = '-';
                                     } else {
-                                        // Hari ini: periksa jam kerja selesai
-                                        const shiftRaw = String(guru.shift || guru.shiftKerja || guru.jamKerja || 'Pagi').trim().toLowerCase();
-                                        const isSiang = shiftRaw.includes('siang');
-                                        const dayOfWeek = info.checkDate.getDay();
-                                        const cfgLokasi = this.mockData?.lokasiDanJamKerja || {};
-                                        const cfgJk = cfgLokasi.jamKerja || {};
-                                        const shiftCfg = isSiang ? (cfgJk.siang || {}) : (cfgJk.pagi || {});
-                                        let defaultPulang = isSiang ? (dayOfWeek === 5 ? '17:30' : '17:00') : (dayOfWeek === 5 ? '11:30' : '12:00');
-                                        let jamPulangStr = defaultPulang;
-                                        if (dayOfWeek === 5) jamPulangStr = shiftCfg.jumat?.pulang || defaultPulang;
-                                        else if (dayOfWeek === 6) jamPulangStr = shiftCfg.sabtu?.pulang || defaultPulang;
-                                        else jamPulangStr = shiftCfg.seninKamis?.pulang || defaultPulang;
-
-                                        let [hP, mP] = (jamPulangStr || defaultPulang).split(':').map(Number);
-                                        if (isNaN(hP)) hP = isSiang ? 17 : (dayOfWeek === 5 ? 11 : 12);
-                                        if (isNaN(mP)) mP = 0;
-                                        let jamKerjaSelesaiTotalMin = (hP * 60) + mP;
-                                        if (!isSiang) {
-                                            const minSelesaiPagi = (dayOfWeek === 6 ? 13 : 14) * 60;
-                                            jamKerjaSelesaiTotalMin = Math.max(minSelesaiPagi, jamKerjaSelesaiTotalMin);
-                                        }
-
-                                        if (currentTotalMin < jamKerjaSelesaiTotalMin) {
+                                        // Hari ini: periksa jam kerja selesai berdasarkan shift terkonfigurasi
+                                        const shiftCfg = this.getShiftKerjaConfig(guru, info.checkDate);
+                                        if (currentTotalMin < shiftCfg.jamKerjaSelesaiMenit) {
                                             code = '-';
                                         } else {
                                             code = 'A';
@@ -5790,26 +5997,26 @@ service cloud.firestore {
         const pagi = jk.pagi || {};
         const siang = jk.siang || {};
 
-        const setVal = (id, val) => {
+        const setVal = (id, val, defVal = '') => {
             const el = document.getElementById(id);
-            if (el && val !== undefined && val !== null) el.value = val;
+            if (el) el.value = (val !== undefined && val !== null && val !== '') ? val : defVal;
         };
 
-        setVal('pengaturan-jam-masuk-pagi', pagi.seninKamis?.masuk);
-        setVal('pengaturan-jam-pulang-pagi', pagi.seninKamis?.pulang);
-        setVal('pengaturan-jam-masuk-pagi-jumat', pagi.jumat?.masuk);
-        setVal('pengaturan-jam-pulang-pagi-jumat', pagi.jumat?.pulang);
-        setVal('pengaturan-jam-masuk-pagi-sabtu', pagi.sabtu?.masuk);
-        setVal('pengaturan-jam-pulang-pagi-sabtu', pagi.sabtu?.pulang);
+        setVal('pengaturan-jam-masuk-pagi', pagi.seninKamis?.masuk, '07:30');
+        setVal('pengaturan-jam-pulang-pagi', pagi.seninKamis?.pulang, '12:00');
+        setVal('pengaturan-jam-masuk-pagi-jumat', pagi.jumat?.masuk, '07:30');
+        setVal('pengaturan-jam-pulang-pagi-jumat', pagi.jumat?.pulang, '11:30');
+        setVal('pengaturan-jam-masuk-pagi-sabtu', pagi.sabtu?.masuk, '07:30');
+        setVal('pengaturan-jam-pulang-pagi-sabtu', pagi.sabtu?.pulang, '12:00');
 
-        setVal('pengaturan-jam-masuk-siang', siang.seninKamis?.masuk);
-        setVal('pengaturan-jam-pulang-siang', siang.seninKamis?.pulang);
-        setVal('pengaturan-jam-masuk-siang-jumat', siang.jumat?.masuk);
-        setVal('pengaturan-jam-pulang-siang-jumat', siang.jumat?.pulang);
-        setVal('pengaturan-jam-masuk-siang-sabtu', siang.sabtu?.masuk);
-        setVal('pengaturan-jam-pulang-siang-sabtu', siang.sabtu?.pulang);
+        setVal('pengaturan-jam-masuk-siang', siang.seninKamis?.masuk, '13:00');
+        setVal('pengaturan-jam-pulang-siang', siang.seninKamis?.pulang, '17:00');
+        setVal('pengaturan-jam-masuk-siang-jumat', siang.jumat?.masuk, '13:30');
+        setVal('pengaturan-jam-pulang-siang-jumat', siang.jumat?.pulang, '17:30');
+        setVal('pengaturan-jam-masuk-siang-sabtu', siang.sabtu?.masuk, '13:00');
+        setVal('pengaturan-jam-pulang-siang-sabtu', siang.sabtu?.pulang, '17:00');
 
-        if (jk.toleransi !== undefined) setVal('pengaturan-toleransi', jk.toleransi);
+        setVal('pengaturan-toleransi', jk.toleransi, 15);
 
         this.updateSimulasiJam();
         this.updateMapDariInput();
@@ -6876,6 +7083,7 @@ service cloud.firestore {
             const fAkun = document.getElementById('filter-guru-status-akun')?.value || '';
             const fKepeg = document.getElementById('filter-guru-status-kepeg')?.value || '';
             const fJab = document.getElementById('filter-guru-jabatan')?.value || '';
+            const fShift = document.getElementById('filter-guru-shift')?.value || '';
             
             // 2. Terapkan filter ke mockData
             let filtered = this.mockData.dataGuru.filter(g => {
@@ -6893,6 +7101,7 @@ service cloud.firestore {
                 }
                 if (fAkun && (g.statusAkun || 'Aktif') !== fAkun) match = false;
                 if (fKepeg && (g.statusKepegawaian || '') !== fKepeg) match = false;
+                if (fShift && (g.shift || 'Pagi').toLowerCase() !== fShift.toLowerCase()) match = false;
                 if (fJab) {
                     if (fJab === 'Lainnya') {
                         const standard = ['Guru', 'Kepala Sekolah', 'Wakil Kepala Sekolah', 'Operator'];
@@ -6926,7 +7135,7 @@ service cloud.firestore {
 
             // 4. Render Tabel
             if (filtered.length === 0) {
-                tbody.innerHTML = `<tr><td colspan="9" class="text-center p-8 text-gray-500">Tidak ada data guru yang cocok dengan pencarian / filter Anda.</td></tr>`;
+                tbody.innerHTML = `<tr><td colspan="10" class="text-center p-8 text-gray-500">Tidak ada data guru yang cocok dengan pencarian / filter Anda.</td></tr>`;
                 return;
             }
 
@@ -6937,6 +7146,10 @@ service cloud.firestore {
                 const badgeClass = statusAkun === 'Aktif' ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700';
                 const sk = g.statusKepegawaian || '-';
                 const statusKepegBadge = sk.includes('PNS') ? 'bg-blue-100 text-blue-700' : (sk.includes('PPPK') ? 'bg-indigo-100 text-indigo-700' : 'bg-gray-100 text-gray-700');
+                const shiftGuru = g.shift || 'Pagi';
+                const isShiftSiang = shiftGuru.toLowerCase().includes('siang');
+                const shiftBadgeClass = isShiftSiang ? 'bg-amber-100 text-amber-700 border border-amber-300' : 'bg-blue-100 text-blue-700 border border-blue-300';
+                const shiftIcon = isShiftSiang ? 'wb_twilight' : 'wb_sunny';
                 const namaGuru = g.nama || 'Guru';
                 const idGuru = g.id || ('GURU' + String(i+1).padStart(3, '0'));
                 const nipGuru = g.nip || '-';
@@ -6953,6 +7166,12 @@ service cloud.firestore {
                         <td class="p-3 text-sm font-bold text-gray-800">${namaGuru}</td>
                         <td class="p-3 text-sm text-gray-700">${jabatanGuru}</td>
                         <td class="p-3 text-sm"><span class="${statusKepegBadge} text-xs px-2 py-1 rounded-md font-medium whitespace-nowrap">${sk}</span></td>
+                        <td class="p-3 text-center">
+                            <button onclick="app.toggleShiftGuru('${idGuru}')" class="${shiftBadgeClass} text-[10px] px-2.5 py-1 rounded-full font-bold uppercase tracking-wider inline-flex items-center gap-1 hover:opacity-80 transition cursor-pointer shadow-xs" title="Klik untuk beralih Shift Pagi / Siang">
+                                <span class="material-icons-round text-[12px]">${shiftIcon}</span>
+                                ${shiftGuru}
+                            </button>
+                        </td>
                         <td class="p-3 text-center"><span class="${badgeClass} text-[10px] px-2 py-1 rounded-full font-bold uppercase tracking-wider">${statusAkun}</span></td>
                         <td class="p-3 text-center flex items-center justify-center gap-1">
                             <button onclick="app.lihatGuru('${idGuru}')" class="w-8 h-8 rounded-full bg-blue-50 text-blue-500 hover:bg-blue-100 flex items-center justify-center transition" title="Lihat"><span class="material-icons-round text-[16px]">visibility</span></button>
@@ -6972,9 +7191,33 @@ service cloud.firestore {
             console.error('Error saat renderDataGuru:', err);
             const tbody = document.getElementById('table-guru-body');
             if (tbody) {
-                tbody.innerHTML = `<tr><td colspan="9" class="text-center p-4 text-red-500">Terjadi kendala saat merender data guru. Silakan coba lagi.</td></tr>`;
+                tbody.innerHTML = `<tr><td colspan="10" class="text-center p-4 text-red-500">Terjadi kendala saat merender data guru. Silakan coba lagi.</td></tr>`;
             }
         }
+    },
+
+    toggleShiftGuru(id) {
+        const guru = this.mockData.dataGuru.find(g => g.id === id);
+        if(!guru) return;
+        
+        const curShift = (guru.shift || 'Pagi').toLowerCase();
+        const nextShift = curShift === 'siang' ? 'Pagi' : 'Siang';
+        guru.shift = nextShift;
+        localStorage.setItem(APP_STORAGE_KEY, JSON.stringify(this.mockData));
+        
+        try {
+            if (typeof db !== 'undefined') {
+                db.collection('data_guru').doc(id).set({ shift: nextShift }, { merge: true });
+            }
+        } catch(e) {}
+        
+        if (this.state && this.state.currentUser && (this.state.currentUser.id === id || this.state.currentUser.username === guru.username)) {
+            this.state.currentUser.shift = nextShift;
+            try { localStorage.setItem('user_info', JSON.stringify(this.state.currentUser)); } catch(e) {}
+        }
+        
+        this.showToast(`Shift guru ${guru.nama} berhasil diubah ke Shift ${nextShift}.`, 'check_circle', 'text-green-400');
+        this.renderDataGuru();
     },
 
     toggleStatusGuru(id) {
@@ -7276,9 +7519,9 @@ service cloud.firestore {
         if(typeof XLSX === 'undefined') return this.showToast('Library SheetJS belum termuat.', 'error', 'text-red-400');
         
         const data = [
-            ['ID_GURU', 'NIP', 'NAMA', 'EMAIL', 'NO_HP', 'JABATAN', 'STATUS_KEPEGAWAIAN', 'USERNAME', 'PASSWORD', 'ROLE', 'STATUS_AKUN'],
-            ['GURU001', '19880001', 'Resti Novika', 'resti@email.com', '081234567890', 'Guru', 'Honorer', 'GURU001', '123456', 'GURU', 'AKTIF'],
-            ['GURU002', '19880002', 'Andi Saputra', 'andi@email.com', '081234567891', 'Guru', 'PNS', 'GURU002', '123456', 'GURU', 'AKTIF']
+            ['ID_GURU', 'NIP', 'NAMA', 'EMAIL', 'NO_HP', 'JABATAN', 'STATUS_KEPEGAWAIAN', 'SHIFT', 'USERNAME', 'PASSWORD', 'ROLE', 'STATUS_AKUN'],
+            ['GURU001', '19880001', 'Resti Novika', 'resti@email.com', '081234567890', 'Guru', 'Honorer', 'Pagi', 'GURU001', '123456', 'GURU', 'AKTIF'],
+            ['GURU002', '19880002', 'Andi Saputra', 'andi@email.com', '081234567891', 'Guru', 'PNS', 'Siang', 'GURU002', '123456', 'GURU', 'AKTIF']
         ];
         
         const ws = XLSX.utils.aoa_to_sheet(data);
@@ -8308,6 +8551,11 @@ service cloud.firestore {
                                         <option value="Operator">Operator</option>
                                         <option value="Lainnya">Lainnya</option>
                                     </select>
+                                    <select id="filter-guru-shift" onchange="app.renderDataGuru()" class="border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-primary outline-none">
+                                        <option value="">Semua Shift</option>
+                                        <option value="Pagi">Shift Pagi</option>
+                                        <option value="Siang">Shift Siang</option>
+                                    </select>
                                 </div>
                             </div>
 
@@ -8324,12 +8572,13 @@ service cloud.firestore {
                                                 <th>Nama</th>
                                                 <th>Jabatan</th>
                                                 <th>Status Kepegawaian</th>
+                                                <th class="text-center">Shift</th>
                                                 <th class="text-center">Status Akun</th>
                                                 <th class="text-center">Aksi</th>
                                             </tr>
                                         </thead>
                                         <tbody id="table-guru-body">
-                                            <tr><td colspan="9" class="text-center p-4">Memuat data...</td></tr>
+                                            <tr><td colspan="10" class="text-center p-4">Memuat data...</td></tr>
                                         </tbody>
                                     </table>
                                 </div>
